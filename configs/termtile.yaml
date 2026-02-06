@@ -1,0 +1,126 @@
+# termtile configuration file.
+#
+# Everything has sensible defaults, so this file can be tiny.
+# This file overrides anything loaded via `include`.
+
+# Optional: load additional config fragments (files or directories).
+# Directories load all *.yaml/*.yml files in sorted filename order.
+include:
+  - config.d
+
+# Hotkey to trigger tiling (Mod4 = Super/Windows key, Mod1 = Alt).
+hotkey: "Mod4-Mod1-t"
+
+# Optional hotkeys (disabled by default).
+# cycle_layout_hotkey: "Mod4-Mod1-l"
+# cycle_layout_reverse_hotkey: "Mod4-Mod1-Shift-l"
+# undo_hotkey: "Mod4-Mod1-u"
+
+# Gap between tiled windows (pixels).
+gap_size: 8
+
+# Optional extra padding around the usable work area (pixels).
+screen_padding:
+  top: 0
+  bottom: 0
+  left: 0
+  right: 0
+
+# Default layout. Built-in layouts are always available.
+default_layout: "auto_full"
+
+# Custom layouts (optional).
+# Use `inherits: builtin:<name>` to base a layout on a built-in layout.
+#
+# layouts:
+#   dev:
+#     inherits: "builtin:fixed_2x2_full"
+#     tile_region:
+#       type: "left-half"
+#     max_terminal_width: 1000
+#
+#   monitor:
+#     inherits: "builtin:auto_full"
+#     max_terminal_height: 800
+
+# Terminal ordering: position, window_id, client_list, active_first.
+terminal_sort: "position"
+
+# Logging: debug, info, warning, error.
+log_level: "info"
+
+# Safety limits to prevent runaway terminal spawning (optional).
+# limits:
+#   max_terminals_per_workspace: 10
+#   max_workspaces: 5
+#   max_terminals_total: 20
+#   workspace_overrides:
+#     my-agents:
+#       max_terminals: 5
+
+# Preferred terminal for spawning new workspaces (optional).
+# If unset, termtile falls back to the first detected/available terminal
+# (including $TERMINAL and system defaults when possible).
+# preferred_terminal: kitty
+
+# Terminal detection defaults to a built-in list; override only if needed.
+# terminal_classes:
+#   - "Alacritty"
+#   - "kitty"
+#
+# Or mark a default terminal explicitly:
+# terminal_classes:
+#   - class: kitty
+#     default: true
+#   - class: Alacritty
+
+# Per-terminal margin adjustments (optional).
+terminal_margins: {}
+
+# AI agent definitions for MCP server (optional).
+# Each agent can be spawned via the spawn_agent MCP tool.
+# When prompt_as_arg is true, the task is passed as a CLI argument
+# for instant delivery instead of waiting for the TUI to stabilize.
+#
+# spawn_mode controls how agents appear:
+#   "pane"   (default) - tmux pane in the caller's window
+#   "window" - separate terminal window with its own tmux session
+#
+# response_fence (default: true) prepends structured output instructions
+# so the agent wraps its answer in [termtile-response] tags. This lets
+# termtile extract just the response, stripping startup noise and TUI chrome.
+# Set to false if an agent doesn't follow fence instructions reliably
+# (falls back to task-text delimiter which still strips startup banners).
+#
+# agents:
+#   claude:
+#     command: claude
+#     args: ["--dangerously-skip-permissions"]
+#     description: "Claude Code CLI agent"
+#     prompt_as_arg: true
+#     idle_pattern: "❯"
+#     response_fence: true
+#     spawn_mode: window    # each agent gets its own terminal window
+#   codex:
+#     command: codex
+#     args: ["--full-auto"]
+#     description: "OpenAI Codex CLI agent"
+#     prompt_as_arg: true
+#     idle_pattern: "›"
+#     response_fence: true
+#   gemini:
+#     command: gemini
+#     description: "Google Gemini CLI"
+#     prompt_as_arg: true
+#     idle_pattern: ">"
+#     response_fence: true
+#   cursor-agent:
+#     command: cursor-agent
+#     description: "Cursor AI agent CLI"
+#     prompt_as_arg: true
+#     idle_pattern: "→"
+#   aider:
+#     command: aider
+#     args: ["--yes"]
+#     description: "Aider AI coding assistant"
+#     prompt_as_arg: false
