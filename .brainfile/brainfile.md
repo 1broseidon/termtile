@@ -57,6 +57,13 @@ columns:
           - config
           - terminal
           - phase-2
+      - id: task-94
+        title: "Test issue: brainfile sync validation"
+        description: Temporary test task to validate the brainfile-to-GitHub-Issues sync pipeline. Should appear as an open issue, then close when moved to done.
+        priority: low
+        tags:
+          - test
+          - ci
   - id: in-progress
     title: In Progress
     tasks: []
