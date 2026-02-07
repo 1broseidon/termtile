@@ -73,7 +73,7 @@ build_body() {
   # Tags
   if [[ -n "$tags_json" && "$tags_json" != "null" && "$tags_json" != "[]" ]]; then
     local tags_str
-    tags_str=$(echo "$tags_json" | yq '.[].tag // .' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+    tags_str=$(echo "$tags_json" | yq '.[]' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
     body+="**Tags:** ${tags_str}"$'\n'
   fi
 
