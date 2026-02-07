@@ -152,7 +152,7 @@ func TestLoadFromPath_InheritsBuiltinAndExplainSource(t *testing.T) {
 	data := `
 layouts:
   dev:
-    inherits: "builtin:fixed_2x2_full"
+    inherits: "builtin:grid"
     tile_region:
       type: "left-half"
 `
@@ -169,22 +169,22 @@ layouts:
 	if !ok {
 		t.Fatalf("expected dev layout")
 	}
-	if layout.Mode != LayoutModeFixed {
-		t.Fatalf("expected inherited mode %q, got %q", LayoutModeFixed, layout.Mode)
+	if layout.Mode != LayoutModeAuto {
+		t.Fatalf("expected inherited mode %q, got %q", LayoutModeAuto, layout.Mode)
 	}
-	if res.LayoutBases["dev"] != "fixed_2x2_full" {
-		t.Fatalf("expected base fixed_2x2_full, got %q", res.LayoutBases["dev"])
+	if res.LayoutBases["dev"] != "grid" {
+		t.Fatalf("expected base grid, got %q", res.LayoutBases["dev"])
 	}
 
 	val, src, err := Explain(res, "layouts.dev.mode")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
-	if val != LayoutModeFixed {
-		t.Fatalf("expected explain value %q, got %#v", LayoutModeFixed, val)
+	if val != LayoutModeAuto {
+		t.Fatalf("expected explain value %q, got %#v", LayoutModeAuto, val)
 	}
-	if src.Kind != SourceBuiltin || src.Name != "fixed_2x2_full" {
-		t.Fatalf("expected builtin source fixed_2x2_full, got %#v", src)
+	if src.Kind != SourceBuiltin || src.Name != "grid" {
+		t.Fatalf("expected builtin source grid, got %#v", src)
 	}
 }
 

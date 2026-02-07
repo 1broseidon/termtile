@@ -27,20 +27,21 @@ screen_padding:
   right: 0
 
 # Default layout. Built-in layouts are always available.
-default_layout: "auto_full"
+default_layout: "grid"
 
 # Custom layouts (optional).
+# Built-in layouts: grid, columns, rows, half-left, half-right
 # Use `inherits: builtin:<name>` to base a layout on a built-in layout.
 #
 # layouts:
 #   dev:
-#     inherits: "builtin:fixed_2x2_full"
+#     inherits: "builtin:grid"
 #     tile_region:
 #       type: "left-half"
 #     max_terminal_width: 1000
 #
 #   monitor:
-#     inherits: "builtin:auto_full"
+#     inherits: "builtin:grid"
 #     max_terminal_height: 800
 
 # Terminal ordering: position, window_id, client_list, active_first.

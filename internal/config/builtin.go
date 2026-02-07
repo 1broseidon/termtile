@@ -3,75 +3,52 @@ package config
 // BuiltinLayouts returns the built-in layout library.
 //
 // These are always available to users without needing to define them in YAML.
+// Users can define additional custom layouts in their config file.
 func BuiltinLayouts() map[string]Layout {
 	return map[string]Layout{
-		"auto_full": {
+		"grid": {
 			Mode: LayoutModeAuto,
 			TileRegion: TileRegion{
 				Type: RegionFull,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
+			FlexibleLastRow: true,
 		},
-		"vertical_full": {
+		"columns": {
 			Mode: LayoutModeVertical,
 			TileRegion: TileRegion{
 				Type: RegionFull,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
 		},
-		"horizontal_full": {
+		"rows": {
 			Mode: LayoutModeHorizontal,
 			TileRegion: TileRegion{
 				Type: RegionFull,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
 		},
-		"left_half_auto": {
+		"half-left": {
 			Mode: LayoutModeAuto,
 			TileRegion: TileRegion{
 				Type: RegionLeftHalf,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
+			FlexibleLastRow: true,
 		},
-		"right_half_auto": {
+		"half-right": {
 			Mode: LayoutModeAuto,
 			TileRegion: TileRegion{
 				Type: RegionRightHalf,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
+			FlexibleLastRow: true,
 		},
-		"top_half_auto": {
-			Mode: LayoutModeAuto,
-			TileRegion: TileRegion{
-				Type: RegionTopHalf,
-			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
-		},
-		"bottom_half_auto": {
-			Mode: LayoutModeAuto,
-			TileRegion: TileRegion{
-				Type: RegionBottomHalf,
-			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
-		},
-		"fixed_2x2_full": {
-			Mode: LayoutModeFixed,
+		"master-stack": {
+			Mode: LayoutModeMasterStack,
 			TileRegion: TileRegion{
 				Type: RegionFull,
 			},
-			FixedGrid: FixedGrid{
-				Rows: 2,
-				Cols: 2,
+			MasterStack: MasterStack{
+				MasterWidthPercent: 40,
+				MaxStackRows:       3,
+				MaxStackCols:       2,
 			},
-			MaxTerminalWidth:  0,
-			MaxTerminalHeight: 0,
 		},
 	}
 }

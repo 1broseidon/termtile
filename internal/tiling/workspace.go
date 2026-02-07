@@ -3,7 +3,10 @@ package tiling
 import (
 	"fmt"
 	"log"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,6 +14,10 @@ import (
 	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
 )
+
+// sessionSlotRe extracts the trailing slot number from a termtile tmux session name
+// e.g. "termtile-my-agents-0" → "0"
+var sessionSlotRe = regexp.MustCompile(`^termtile-.*-(\d+)$`)
 
 // Workspace tracks the tiling state for a monitor
 type Workspace struct {
@@ -126,7 +133,13 @@ func (t *Tiler) TileCurrentMonitor() error {
 		return nil
 	}
 
-	sortTerminals(t.backend, terminalWindows, t.config.TerminalSort)
+	// Master-stack sorts by session slot so agent-0 is always master.
+	// The slot number is parsed from the tmux session name in the window title.
+	sortMode := t.config.TerminalSort
+	if layout.Mode == config.LayoutModeMasterStack {
+		sortMode = "session_slot"
+	}
+	sortTerminals(t.backend, terminalWindows, sortMode)
 
 	previous := make(map[platform.WindowID]Rect, len(terminalWindows))
 	for _, term := range terminalWindows {
@@ -140,7 +153,7 @@ func (t *Tiler) TileCurrentMonitor() error {
 
 	// Log detected terminals
 	for i, term := range terminalWindows {
-		log.Printf("  Terminal %d: %s (ID: %d)", i+1, term.Class, term.WindowID)
+		log.Printf("  Terminal %d: %s (ID: %d, title: %s)", i+1, term.Class, term.WindowID, term.Title)
 	}
 
 	// Step 5: Calculate positions using layout
@@ -513,7 +526,12 @@ func (t *Tiler) PreviewLayout(layoutName string, duration time.Duration) error {
 		return nil
 	}
 
-	sortTerminals(t.backend, terminalWindows, t.config.TerminalSort)
+	// Master-stack sorts by session slot so agent-0 is always master.
+	sortMode := t.config.TerminalSort
+	if layout.Mode == config.LayoutModeMasterStack {
+		sortMode = "session_slot"
+	}
+	sortTerminals(t.backend, terminalWindows, sortMode)
 
 	snapshot := make(map[platform.WindowID]Rect, len(terminalWindows))
 	for _, term := range terminalWindows {
@@ -597,10 +615,32 @@ func (t *Tiler) restoreWindowsLocked(snapshot map[platform.WindowID]Rect) {
 	}
 }
 
+// parseSessionSlot extracts the slot number from a termtile tmux session title.
+// Returns math.MaxInt for non-matching titles so they sort after slotted windows.
+func parseSessionSlot(title string) int {
+	m := sessionSlotRe.FindStringSubmatch(title)
+	if m == nil {
+		return math.MaxInt
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return math.MaxInt
+	}
+	return n
+}
+
 func sortTerminals(backend platform.Backend, terminals []terminals.TerminalWindow, mode string) {
 	switch mode {
 	case "client_list":
 		return
+	case "session_slot":
+		sort.SliceStable(terminals, func(i, j int) bool {
+			si, sj := parseSessionSlot(terminals[i].Title), parseSessionSlot(terminals[j].Title)
+			if si != sj {
+				return si < sj
+			}
+			return terminals[i].WindowID < terminals[j].WindowID
+		})
 	case "window_id":
 		sort.Slice(terminals, func(i, j int) bool {
 			return terminals[i].WindowID < terminals[j].WindowID

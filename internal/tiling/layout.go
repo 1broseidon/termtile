@@ -107,6 +107,81 @@ func CalculatePositionsWithLayout(
 		// Single row - flexible last row is meaningless
 		flexibleLastRow = false
 
+	case config.LayoutModeMasterStack:
+		ms := layout.MasterStack
+
+		// Master pane always uses MasterWidthPercent regardless of window count.
+		// No auto-expand — agents spawn into their right-side slots.
+		masterWidth := (monitor.Width * ms.MasterWidthPercent / 100) - gapSize
+
+		if numWindows == 1 {
+			return []Rect{{
+				X:      monitor.X + gapSize,
+				Y:      monitor.Y + gapSize,
+				Width:  masterWidth,
+				Height: monitor.Height - 2*gapSize,
+			}}, nil
+		}
+
+		// Right region for stack grid
+		rightStartX := monitor.X + masterWidth + 2*gapSize
+		rightRegionWidth := monitor.Width - masterWidth - 3*gapSize
+		stackHeight := monitor.Height - 2*gapSize
+
+		stackCount := numWindows - 1
+
+		// Auto-grid: cols = ceil(stackCount / MaxStackRows) capped at MaxStackCols
+		stackCols := int(math.Ceil(float64(stackCount) / float64(ms.MaxStackRows)))
+		if stackCols > ms.MaxStackCols {
+			stackCols = ms.MaxStackCols
+		}
+		if stackCols < 1 {
+			stackCols = 1
+		}
+		stackRows := int(math.Ceil(float64(stackCount) / float64(stackCols)))
+		if stackRows > ms.MaxStackRows {
+			stackRows = ms.MaxStackRows
+		}
+
+		// Cap to grid capacity
+		maxStack := stackRows * stackCols
+		if stackCount > maxStack {
+			stackCount = maxStack
+			numWindows = stackCount + 1
+		}
+
+		// Cell dimensions within right region
+		cellWidth := (rightRegionWidth - (stackCols-1)*gapSize) / stackCols
+		cellHeight := (stackHeight - (stackRows-1)*gapSize) / stackRows
+
+		if masterWidth <= 0 || cellWidth <= 0 || cellHeight <= 0 {
+			return nil, fmt.Errorf(
+				"insufficient space for master-stack layout: monitor=%dx%d masterWidth=%d cellWidth=%d cellHeight=%d gap=%d",
+				monitor.Width, monitor.Height, masterWidth, cellWidth, cellHeight, gapSize,
+			)
+		}
+
+		positions := make([]Rect, numWindows)
+		positions[0] = Rect{
+			X:      monitor.X + gapSize,
+			Y:      monitor.Y + gapSize,
+			Width:  masterWidth,
+			Height: stackHeight,
+		}
+
+		for i := 0; i < stackCount; i++ {
+			row := i / stackCols
+			col := i % stackCols
+			positions[i+1] = Rect{
+				X:      rightStartX + col*(cellWidth+gapSize),
+				Y:      monitor.Y + gapSize + row*(cellHeight+gapSize),
+				Width:  cellWidth,
+				Height: cellHeight,
+			}
+		}
+
+		return positions, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported layout mode: %q", layout.Mode)
 	}

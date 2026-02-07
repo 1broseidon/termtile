@@ -11,6 +11,7 @@ import (
 type TerminalWindow struct {
 	WindowID platform.WindowID
 	Class    string
+	Title    string
 	X        int
 	Y        int
 	Width    int
@@ -77,6 +78,7 @@ func (d *Detector) FindTerminals(backend platform.Backend, displayID int, bounds
 		terminals = append(terminals, TerminalWindow{
 			WindowID: w.ID,
 			Class:    w.AppID,
+			Title:    w.Title,
 			X:        w.Bounds.X,
 			Y:        w.Bounds.Y,
 			Width:    w.Bounds.Width,

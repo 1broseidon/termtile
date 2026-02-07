@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	DefaultBuiltinLayout = "auto_full"
+	DefaultBuiltinLayout = "grid"
 )
 
 type ValidationError struct {
@@ -317,6 +317,17 @@ func mergeLayoutPatch(base Layout, patch RawLayout) (Layout, error) {
 		}
 		if patch.FixedGrid.Cols != nil {
 			out.FixedGrid.Cols = *patch.FixedGrid.Cols
+		}
+	}
+	if patch.MasterStack != nil {
+		if patch.MasterStack.MasterWidthPercent != nil {
+			out.MasterStack.MasterWidthPercent = *patch.MasterStack.MasterWidthPercent
+		}
+		if patch.MasterStack.MaxStackRows != nil {
+			out.MasterStack.MaxStackRows = *patch.MasterStack.MaxStackRows
+		}
+		if patch.MasterStack.MaxStackCols != nil {
+			out.MasterStack.MaxStackCols = *patch.MasterStack.MaxStackCols
 		}
 	}
 	if patch.MaxTerminalWidth != nil {

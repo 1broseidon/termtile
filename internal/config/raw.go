@@ -64,14 +64,21 @@ type RawTileRegion struct {
 	HeightPercent *int        `yaml:"height_percent"`
 }
 
+type RawMasterStack struct {
+	MasterWidthPercent *int `yaml:"master_width_percent"`
+	MaxStackRows       *int `yaml:"max_stack_rows"`
+	MaxStackCols       *int `yaml:"max_stack_cols"`
+}
+
 type RawLayout struct {
-	Inherits          *string        `yaml:"inherits"`
-	Mode              *LayoutMode    `yaml:"mode"`
-	TileRegion        *RawTileRegion `yaml:"tile_region"`
-	FixedGrid         *RawFixedGrid  `yaml:"fixed_grid"`
-	MaxTerminalWidth  *int           `yaml:"max_terminal_width"`
-	MaxTerminalHeight *int           `yaml:"max_terminal_height"`
-	FlexibleLastRow   *bool          `yaml:"flexible_last_row"`
+	Inherits          *string          `yaml:"inherits"`
+	Mode              *LayoutMode      `yaml:"mode"`
+	TileRegion        *RawTileRegion   `yaml:"tile_region"`
+	FixedGrid         *RawFixedGrid    `yaml:"fixed_grid"`
+	MasterStack       *RawMasterStack  `yaml:"master_stack"`
+	MaxTerminalWidth  *int             `yaml:"max_terminal_width"`
+	MaxTerminalHeight *int             `yaml:"max_terminal_height"`
+	FlexibleLastRow   *bool            `yaml:"flexible_last_row"`
 }
 
 type RawWorkspaceLimit struct {
@@ -352,6 +359,20 @@ func mergeRawFixedGrid(base RawFixedGrid, overlay RawFixedGrid) RawFixedGrid {
 	return out
 }
 
+func mergeRawMasterStack(base RawMasterStack, overlay RawMasterStack) RawMasterStack {
+	out := base
+	if overlay.MasterWidthPercent != nil {
+		out.MasterWidthPercent = overlay.MasterWidthPercent
+	}
+	if overlay.MaxStackRows != nil {
+		out.MaxStackRows = overlay.MaxStackRows
+	}
+	if overlay.MaxStackCols != nil {
+		out.MaxStackCols = overlay.MaxStackCols
+	}
+	return out
+}
+
 func mergeRawLayout(base RawLayout, overlay RawLayout) RawLayout {
 	out := base
 	if overlay.Inherits != nil {
@@ -373,6 +394,13 @@ func mergeRawLayout(base RawLayout, overlay RawLayout) RawLayout {
 		}
 		merged := mergeRawFixedGrid(*out.FixedGrid, *overlay.FixedGrid)
 		out.FixedGrid = &merged
+	}
+	if overlay.MasterStack != nil {
+		if out.MasterStack == nil {
+			out.MasterStack = &RawMasterStack{}
+		}
+		merged := mergeRawMasterStack(*out.MasterStack, *overlay.MasterStack)
+		out.MasterStack = &merged
 	}
 	if overlay.MaxTerminalWidth != nil {
 		out.MaxTerminalWidth = overlay.MaxTerminalWidth

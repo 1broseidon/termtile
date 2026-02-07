@@ -22,10 +22,11 @@ type Margins struct {
 type LayoutMode string
 
 const (
-	LayoutModeAuto       LayoutMode = "auto"       // Dynamic grid based on count.
-	LayoutModeFixed      LayoutMode = "fixed"      // Specific rows × cols.
-	LayoutModeVertical   LayoutMode = "vertical"   // Single column stack.
-	LayoutModeHorizontal LayoutMode = "horizontal" // Single row side-by-side.
+	LayoutModeAuto        LayoutMode = "auto"         // Dynamic grid based on count.
+	LayoutModeFixed       LayoutMode = "fixed"        // Specific rows × cols.
+	LayoutModeVertical    LayoutMode = "vertical"     // Single column stack.
+	LayoutModeHorizontal  LayoutMode = "horizontal"   // Single row side-by-side.
+	LayoutModeMasterStack LayoutMode = "master-stack" // Master pane left, stack grid right.
 )
 
 // RegionType defines tile region presets.
@@ -55,14 +56,22 @@ type FixedGrid struct {
 	Cols int `yaml:"cols"`
 }
 
+// MasterStack defines the master-stack layout parameters.
+type MasterStack struct {
+	MasterWidthPercent int `yaml:"master_width_percent"` // Width of master pane as percentage (10-90)
+	MaxStackRows       int `yaml:"max_stack_rows"`       // Maximum rows in the stack grid (>= 1)
+	MaxStackCols       int `yaml:"max_stack_cols"`       // Maximum columns in the stack grid (>= 1)
+}
+
 // Layout defines a tiling configuration.
 type Layout struct {
-	Mode              LayoutMode `yaml:"mode"`
-	TileRegion        TileRegion `yaml:"tile_region"`
-	FixedGrid         FixedGrid  `yaml:"fixed_grid,omitempty"`
-	MaxTerminalWidth  int        `yaml:"max_terminal_width"`  // 0 = unlimited
-	MaxTerminalHeight int        `yaml:"max_terminal_height"` // 0 = unlimited
-	FlexibleLastRow   bool       `yaml:"flexible_last_row"`   // Last row windows expand to fill width (auto mode only)
+	Mode              LayoutMode  `yaml:"mode"`
+	TileRegion        TileRegion  `yaml:"tile_region"`
+	FixedGrid         FixedGrid   `yaml:"fixed_grid,omitempty"`
+	MasterStack       MasterStack `yaml:"master_stack,omitempty"`
+	MaxTerminalWidth  int         `yaml:"max_terminal_width"`  // 0 = unlimited
+	MaxTerminalHeight int         `yaml:"max_terminal_height"` // 0 = unlimited
+	FlexibleLastRow   bool        `yaml:"flexible_last_row"`   // Last row windows expand to fill width (auto mode only)
 }
 
 // AgentMode configures the agent/multiplexer integration
@@ -509,7 +518,7 @@ func (c *Config) validationWarnings() []string {
 // validateLayout checks if a layout configuration is valid.
 func validateLayout(layout *Layout) error {
 	switch layout.Mode {
-	case LayoutModeAuto, LayoutModeFixed, LayoutModeVertical, LayoutModeHorizontal:
+	case LayoutModeAuto, LayoutModeFixed, LayoutModeVertical, LayoutModeHorizontal, LayoutModeMasterStack:
 	default:
 		return fmt.Errorf("invalid mode %q", layout.Mode)
 	}
@@ -517,6 +526,18 @@ func validateLayout(layout *Layout) error {
 	if layout.Mode == LayoutModeFixed {
 		if layout.FixedGrid.Rows <= 0 || layout.FixedGrid.Cols <= 0 {
 			return fmt.Errorf("fixed mode requires rows and cols to be positive")
+		}
+	}
+
+	if layout.Mode == LayoutModeMasterStack {
+		if layout.MasterStack.MasterWidthPercent < 10 || layout.MasterStack.MasterWidthPercent > 90 {
+			return fmt.Errorf("master_stack.master_width_percent must be between 10 and 90")
+		}
+		if layout.MasterStack.MaxStackRows < 1 {
+			return fmt.Errorf("master_stack.max_stack_rows must be >= 1")
+		}
+		if layout.MasterStack.MaxStackCols < 1 {
+			return fmt.Errorf("master_stack.max_stack_cols must be >= 1")
 		}
 	}
 
