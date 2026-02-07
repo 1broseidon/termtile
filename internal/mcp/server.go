@@ -39,6 +39,7 @@ type Server struct {
 	mcpServer   *mcpsdk.Server
 	config      *config.Config
 	multiplexer *agent.TmuxMultiplexer
+	logger      *agent.Logger
 
 	mu       sync.Mutex
 	tracked  map[string]map[int]trackedAgent // workspace -> slot -> info
@@ -52,9 +53,29 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("tmux is required for MCP server but not found in PATH")
 	}
 
+	logCfg := cfg.GetLoggingConfig()
+	var logger *agent.Logger
+	if logCfg.Enabled {
+		var err error
+		logger, err = agent.NewLogger(agent.LogConfig{
+			Enabled:        logCfg.Enabled,
+			Level:          agent.ParseLogLevel(logCfg.Level),
+			FilePath:       logCfg.File,
+			MaxSizeMB:      logCfg.MaxSizeMB,
+			MaxFiles:       logCfg.MaxFiles,
+			IncludeContent: logCfg.IncludeContent,
+			PreviewLength:  logCfg.PreviewLength,
+		})
+		if err != nil {
+			log.Printf("Warning: failed to initialize MCP logger: %v", err)
+			logger = nil
+		}
+	}
+
 	s := &Server{
 		config:      cfg,
 		multiplexer: mux,
+		logger:      logger,
 		tracked:     make(map[string]map[int]trackedAgent),
 		nextSlot:    make(map[string]int),
 	}
@@ -75,6 +96,14 @@ func NewServer(cfg *config.Config) (*Server, error) {
 // Run starts the MCP server on stdio transport, blocking until done.
 func (s *Server) Run(ctx context.Context) error {
 	return s.mcpServer.Run(ctx, &mcpsdk.StdioTransport{})
+}
+
+// Close releases server resources.
+func (s *Server) Close() error {
+	if s == nil || s.logger == nil {
+		return nil
+	}
+	return s.logger.Close()
 }
 
 func (s *Server) registerTools() {

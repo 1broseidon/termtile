@@ -16,6 +16,36 @@ import (
 	workspacepkg "github.com/1broseidon/termtile/internal/workspace"
 )
 
+func (s *Server) logTextOptions() (includeContent bool, previewLen int) {
+	previewLen = 50
+	if s == nil || s.config == nil {
+		return false, previewLen
+	}
+	logCfg := s.config.GetLoggingConfig()
+	if logCfg.PreviewLength > 0 {
+		previewLen = logCfg.PreviewLength
+	}
+	return logCfg.IncludeContent, previewLen
+}
+
+func (s *Server) addTextDetails(details map[string]interface{}, text string) {
+	includeContent, previewLen := s.logTextOptions()
+	details["text_length"] = len(text)
+	details["text_preview"] = agent.Truncate(text, previewLen)
+	if includeContent {
+		details["text"] = text
+	}
+}
+
+func (s *Server) addOutputDetails(details map[string]interface{}, output string) {
+	includeContent, previewLen := s.logTextOptions()
+	details["output_length"] = len(output)
+	details["output_preview"] = agent.Truncate(output, previewLen)
+	if includeContent {
+		details["output"] = output
+	}
+}
+
 func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, args SpawnAgentInput) (*mcpsdk.CallToolResult, SpawnAgentOutput, error) {
 	agentCfg, ok := s.config.Agents[args.AgentType]
 	if !ok {
@@ -24,6 +54,17 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 			available = append(available, k)
 		}
 		sort.Strings(available)
+		if s.logger != nil {
+			workspaceForLog := strings.TrimSpace(args.Workspace)
+			if workspaceForLog == "" {
+				workspaceForLog = DefaultWorkspace
+			}
+			s.logger.Log(agent.ActionSpawnAgent, workspaceForLog, -1, map[string]interface{}{
+				"agent_type":      args.AgentType,
+				"available_count": len(available),
+				"error":           "unknown_agent_type",
+			})
+		}
 		return nil, SpawnAgentOutput{}, fmt.Errorf("unknown agent type %q; available: %v", args.AgentType, available)
 	}
 
@@ -85,6 +126,13 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		// available), then send the agent command via send-keys.
 		target, s2, err := s.spawnWindow(workspaceName, args.AgentType, args.Cwd, taskMarker, responseFence, agentCfg)
 		if err != nil {
+			if s.logger != nil {
+				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
+					"agent_type": args.AgentType,
+					"spawn_mode": spawnMode,
+					"error":      "spawn_failed",
+				})
+			}
 			return nil, SpawnAgentOutput{}, err
 		}
 		tmuxTarget = target
@@ -98,6 +146,13 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	} else {
 		target, s2, err := s.spawnPane(workspaceName, args.AgentType, agentCmd, args.Cwd, taskMarker, responseFence, agentCfg)
 		if err != nil {
+			if s.logger != nil {
+				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
+					"agent_type": args.AgentType,
+					"spawn_mode": spawnMode,
+					"error":      "spawn_failed",
+				})
+			}
 			return nil, SpawnAgentOutput{}, err
 		}
 		tmuxTarget = target
@@ -108,6 +163,21 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	// wait until the agent is ready then send via tmux send-keys.
 	if args.Task != "" && !promptInCmd {
 		s.waitAndSendTask(tmuxTarget, args.AgentType, taskToSend, agentCfg)
+	}
+
+	if s.logger != nil {
+		details := map[string]interface{}{
+			"agent_type":    args.AgentType,
+			"spawn_mode":    spawnMode,
+			"cwd":           args.Cwd,
+			"prompt_as_arg": promptInCmd,
+			"has_task":      args.Task != "",
+		}
+		if selectedModel != "" {
+			details["model"] = selectedModel
+		}
+		s.addTextDetails(details, args.Task)
+		s.logger.Log(agent.ActionSpawnAgent, workspaceName, slot, details)
 	}
 
 	return nil, SpawnAgentOutput{
@@ -369,15 +439,20 @@ func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest,
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
+		if s.logger != nil {
+			s.logger.Log(agent.ActionSend, workspaceName, args.Slot, map[string]interface{}{
+				"error": "agent_not_tracked",
+			})
+		}
 		return nil, nil, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
 	textToSend := args.Text
+	agentType := s.getAgentType(workspaceName, args.Slot)
 	taskMarker := ""
 	responseFence := false
 	if args.Text != "" {
 		taskMarker = generateMarker()
-		agentType := s.getAgentType(workspaceName, args.Slot)
 		if agentType != "" {
 			if agentCfg, ok := s.config.Agents[agentType]; ok && agentCfg.ResponseFence {
 				responseFence = true
@@ -388,10 +463,32 @@ func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest,
 	}
 
 	if err := tmuxSendKeys(target, textToSend); err != nil {
+		if s.logger != nil {
+			details := map[string]interface{}{
+				"agent_type":     agentType,
+				"response_fence": responseFence,
+				"sent_length":    len(textToSend),
+				"error":          "send_failed",
+			}
+			s.addTextDetails(details, args.Text)
+			s.logger.Log(agent.ActionSend, workspaceName, args.Slot, details)
+		}
 		return nil, nil, fmt.Errorf("failed to send to slot %d (target %s): %w", args.Slot, target, err)
 	}
 	if taskMarker != "" {
 		s.updateOutputConfig(workspaceName, args.Slot, taskMarker, responseFence)
+	}
+	if s.logger != nil {
+		details := map[string]interface{}{
+			"agent_type":     agentType,
+			"response_fence": responseFence,
+			"sent_length":    len(textToSend),
+		}
+		if taskMarker != "" {
+			details["task_marker"] = taskMarker
+		}
+		s.addTextDetails(details, args.Text)
+		s.logger.Log(agent.ActionSend, workspaceName, args.Slot, details)
 	}
 
 	return &mcpsdk.CallToolResult{
@@ -405,8 +502,14 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
+		if s.logger != nil {
+			s.logger.Log(agent.ActionRead, workspaceName, args.Slot, map[string]interface{}{
+				"error": "agent_not_tracked",
+			})
+		}
 		return nil, ReadFromAgentOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
+	agentType := s.getAgentType(workspaceName, args.Slot)
 
 	lines := args.Lines
 	if lines <= 0 {
@@ -431,6 +534,18 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		if err != nil {
 			// Timeout: return found=false with whatever output we captured.
 			found := false
+			if s.logger != nil {
+				details := map[string]interface{}{
+					"agent_type":      agentType,
+					"lines":           lines,
+					"clean":           args.Clean,
+					"pattern":         args.Pattern,
+					"timeout_seconds": int(timeout / time.Second),
+					"found":           found,
+				}
+				s.addOutputDetails(details, output)
+				s.logger.Log(agent.ActionRead, workspaceName, args.Slot, details)
+			}
 			return nil, ReadFromAgentOutput{
 				Output:      output,
 				SessionName: target,
@@ -439,6 +554,18 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		}
 
 		found := true
+		if s.logger != nil {
+			details := map[string]interface{}{
+				"agent_type":      agentType,
+				"lines":           lines,
+				"clean":           args.Clean,
+				"pattern":         args.Pattern,
+				"timeout_seconds": int(timeout / time.Second),
+				"found":           found,
+			}
+			s.addOutputDetails(details, output)
+			s.logger.Log(agent.ActionRead, workspaceName, args.Slot, details)
+		}
 		return nil, ReadFromAgentOutput{
 			Output:      output,
 			SessionName: target,
@@ -449,6 +576,14 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 	// One-shot read (no pattern).
 	output, err := tmuxCapturePane(target, lines)
 	if err != nil {
+		if s.logger != nil {
+			s.logger.Log(agent.ActionRead, workspaceName, args.Slot, map[string]interface{}{
+				"agent_type": agentType,
+				"lines":      lines,
+				"clean":      args.Clean,
+				"error":      "capture_failed",
+			})
+		}
 		return nil, ReadFromAgentOutput{}, fmt.Errorf("failed to read from slot %d (target %s): %w", args.Slot, target, err)
 	}
 
@@ -457,6 +592,15 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 	}
 
 	output = trimOutput(output, marker, fence)
+	if s.logger != nil {
+		details := map[string]interface{}{
+			"agent_type": agentType,
+			"lines":      lines,
+			"clean":      args.Clean,
+		}
+		s.addOutputDetails(details, output)
+		s.logger.Log(agent.ActionRead, workspaceName, args.Slot, details)
+	}
 
 	return nil, ReadFromAgentOutput{
 		Output:      output,
@@ -494,6 +638,23 @@ func (s *Server) handleListAgents(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	sort.Slice(agents, func(i, j int) bool {
 		return agents[i].Slot < agents[j].Slot
 	})
+	if s.logger != nil {
+		idleCount := 0
+		missingCount := 0
+		for _, a := range agents {
+			if a.Exists && a.IsIdle {
+				idleCount++
+			}
+			if !a.Exists {
+				missingCount++
+			}
+		}
+		s.logger.Log(agent.ActionListAgents, workspaceName, -1, map[string]interface{}{
+			"agent_count":   len(agents),
+			"idle_count":    idleCount,
+			"missing_count": missingCount,
+		})
+	}
 
 	return nil, ListAgentsOutput{
 		Workspace: workspaceName,
@@ -505,10 +666,17 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
+		if s.logger != nil {
+			s.logger.Log(agent.ActionKillAgent, workspaceName, args.Slot, map[string]interface{}{
+				"killed": false,
+				"error":  "agent_not_tracked",
+			})
+		}
 		return nil, KillAgentOutput{Killed: false}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
 	mode := s.getSpawnMode(workspaceName, args.Slot)
+	agentType := s.getAgentType(workspaceName, args.Slot)
 
 	if mode == "window" {
 		// Window-mode: kill the entire tmux session. The terminal window
@@ -546,6 +714,14 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 			_ = exec.Command("tmux", "select-layout", "-t", remainingPane, "tiled").Run()
 		}
 	}
+	if s.logger != nil {
+		s.logger.Log(agent.ActionKillAgent, workspaceName, args.Slot, map[string]interface{}{
+			"agent_type":   agentType,
+			"spawn_mode":   mode,
+			"session_name": target,
+			"killed":       true,
+		})
+	}
 
 	return nil, KillAgentOutput{
 		SessionName: target,
@@ -557,6 +733,11 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
+		if s.logger != nil {
+			s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, map[string]interface{}{
+				"error": "agent_not_tracked",
+			})
+		}
 		return nil, WaitForIdleOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
@@ -572,16 +753,39 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 	agentType := s.getAgentType(workspaceName, args.Slot)
 	marker, fence := s.getOutputConfig(workspaceName, args.Slot)
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
 
 	for {
 		if s.checkIdle(target, agentType, workspaceName, args.Slot) {
 			output, err := tmuxCapturePane(target, lines)
 			if err != nil {
+				if s.logger != nil {
+					s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, map[string]interface{}{
+						"agent_type":      agentType,
+						"is_idle":         false,
+						"lines":           lines,
+						"timeout_seconds": int(timeout / time.Second),
+						"elapsed_ms":      time.Since(start).Milliseconds(),
+						"error":           "capture_failed",
+					})
+				}
 				return nil, WaitForIdleOutput{}, fmt.Errorf("failed to capture output from slot %d (target %s): %w", args.Slot, target, err)
+			}
+			cleanedOutput := trimOutput(cleanOutput(output), marker, fence)
+			if s.logger != nil {
+				details := map[string]interface{}{
+					"agent_type":      agentType,
+					"is_idle":         true,
+					"lines":           lines,
+					"timeout_seconds": int(timeout / time.Second),
+					"elapsed_ms":      time.Since(start).Milliseconds(),
+				}
+				s.addOutputDetails(details, cleanedOutput)
+				s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, details)
 			}
 			return nil, WaitForIdleOutput{
 				IsIdle:      true,
-				Output:      trimOutput(cleanOutput(output), marker, fence),
+				Output:      cleanedOutput,
 				SessionName: target,
 			}, nil
 		}
@@ -589,9 +793,21 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 		if time.Now().After(deadline) {
 			// Timeout: return whatever output is available.
 			output, _ := tmuxCapturePane(target, lines)
+			cleanedOutput := trimOutput(cleanOutput(output), marker, fence)
+			if s.logger != nil {
+				details := map[string]interface{}{
+					"agent_type":      agentType,
+					"is_idle":         false,
+					"lines":           lines,
+					"timeout_seconds": int(timeout / time.Second),
+					"elapsed_ms":      time.Since(start).Milliseconds(),
+				}
+				s.addOutputDetails(details, cleanedOutput)
+				s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, details)
+			}
 			return nil, WaitForIdleOutput{
 				IsIdle:      false,
-				Output:      trimOutput(cleanOutput(output), marker, fence),
+				Output:      cleanedOutput,
 				SessionName: target,
 			}, nil
 		}
