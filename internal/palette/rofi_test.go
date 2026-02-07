@@ -48,6 +48,22 @@ func TestRofiFormatItem_DimDivider(t *testing.T) {
 	}
 }
 
+func TestRofiFormatItem_BoldHeader(t *testing.T) {
+	b := NewRofiBackend().(*dmenuLikeBackend)
+
+	out := b.formatItem(Item{
+		Label:    "Section",
+		IsHeader: true,
+	}, 0)
+
+	if !strings.Contains(out, "<b>Section</b>") {
+		t.Fatalf("expected bold markup for header, got %q", out)
+	}
+	if !strings.Contains(out, "\x00nonselectable\x1ftrue") {
+		t.Fatalf("expected nonselectable property for header, got %q", out)
+	}
+}
+
 func TestRofiBuildArgs_UsesIndexFormatAndNoCustom(t *testing.T) {
 	b := NewRofiBackend().(*dmenuLikeBackend)
 
@@ -134,6 +150,19 @@ func TestFormatInput_DisambiguatesDuplicateLabels(t *testing.T) {
 	}
 	if items[1].Label != "Dup (2)" {
 		t.Fatalf("expected second label disambiguated, got %q", items[1].Label)
+	}
+}
+
+func TestFormatInput_IndexBackendsDoNotDisambiguateDuplicateLabels(t *testing.T) {
+	b := NewRofiBackend().(*dmenuLikeBackend)
+	items := []Item{
+		{Label: "Dup", Action: "a"},
+		{Label: "Dup", Action: "b"},
+	}
+
+	_, _ = b.formatInput(items)
+	if items[0].Label != "Dup" || items[1].Label != "Dup" {
+		t.Fatalf("expected labels unchanged for index backend, got %#v", items)
 	}
 }
 

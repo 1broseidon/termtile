@@ -13,6 +13,7 @@ import (
 
 	"github.com/1broseidon/termtile/internal/agent"
 	"github.com/1broseidon/termtile/internal/config"
+	workspacepkg "github.com/1broseidon/termtile/internal/workspace"
 )
 
 func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, args SpawnAgentInput) (*mcpsdk.CallToolResult, SpawnAgentOutput, error) {
@@ -26,7 +27,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		return nil, SpawnAgentOutput{}, fmt.Errorf("unknown agent type %q; available: %v", args.AgentType, available)
 	}
 
-	workspace := resolveWorkspace(args.Workspace)
+	workspaceName := resolveWorkspaceName(args.Workspace)
 	spawnMode := resolveSpawnMode(args.Window, agentCfg.SpawnMode)
 
 	// Determine the task text to send to the agent.
@@ -43,29 +44,59 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		taskToSend = appendMarker(taskToSend, taskMarker)
 	}
 
-	// Build the command string: "command arg1 arg2 ..."
-	// When PromptAsArg is true and a task is provided, append the task
-	// as a CLI argument instead of sending it via tmux send-keys later.
+	// Build the agent command string: "command arg1 arg2 ..."
 	cmdParts := []string{agentCfg.Command}
 	cmdParts = append(cmdParts, agentCfg.Args...)
+	var selectedModel string
+	if args.Model != nil {
+		selectedModel = strings.TrimSpace(*args.Model)
+	}
+	if selectedModel == "" {
+		selectedModel = strings.TrimSpace(agentCfg.DefaultModel)
+	}
+	if selectedModel != "" {
+		if len(agentCfg.Models) > 0 && !isKnownModel(selectedModel, agentCfg.Models) {
+			log.Printf("Warning: unknown model %q for agent %q (configured models: %v)", selectedModel, args.AgentType, agentCfg.Models)
+		}
+		modelFlag := strings.TrimSpace(agentCfg.ModelFlag)
+		if modelFlag == "" {
+			modelFlag = "--model"
+		}
+		cmdParts = append(cmdParts, modelFlag, shellQuote(selectedModel))
+	}
+
+	// When PromptAsArg is true and a task is provided, append the task
+	// as a CLI argument instead of sending it via tmux send-keys later.
 	promptInCmd := agentCfg.PromptAsArg && args.Task != ""
+	if promptInCmd && len(taskToSend) > 32*1024 {
+		promptInCmd = false
+	}
 	if promptInCmd {
 		cmdParts = append(cmdParts, shellQuote(taskToSend))
 	}
-	fullCmd := strings.Join(cmdParts, " ")
+	agentCmd := strings.Join(cmdParts, " ")
 
 	var tmuxTarget string
 	var slot int
 
 	if spawnMode == "window" {
-		target, s2, err := s.spawnWindow(workspace, args.AgentType, fullCmd, args.Cwd, taskMarker, responseFence, agentCfg)
+		// Window mode: start tmux with the default shell (so that
+		// .zshrc/.bashrc are sourced and tool paths like proto/nvm are
+		// available), then send the agent command via send-keys.
+		target, s2, err := s.spawnWindow(workspaceName, args.AgentType, args.Cwd, taskMarker, responseFence, agentCfg)
 		if err != nil {
 			return nil, SpawnAgentOutput{}, err
 		}
 		tmuxTarget = target
 		slot = s2
+
+		// Wait for the shell to become ready, then send the agent command.
+		s.waitForShellAndSend(tmuxTarget, agentCmd)
+
+		// If the task was baked into the agent command (promptInCmd),
+		// we're done. Otherwise fall through to waitAndSendTask below.
 	} else {
-		target, s2, err := s.spawnPane(workspace, args.AgentType, fullCmd, args.Cwd, taskMarker, responseFence, agentCfg)
+		target, s2, err := s.spawnPane(workspaceName, args.AgentType, agentCmd, args.Cwd, taskMarker, responseFence, agentCfg)
 		if err != nil {
 			return nil, SpawnAgentOutput{}, err
 		}
@@ -83,7 +114,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		Slot:        slot,
 		SessionName: tmuxTarget,
 		AgentType:   args.AgentType,
-		Workspace:   workspace,
+		Workspace:   workspaceName,
 		SpawnMode:   spawnMode,
 	}, nil
 }
@@ -136,10 +167,21 @@ func (s *Server) spawnPane(workspace, agentType, fullCmd, cwd, taskMarker string
 	return tmuxTarget, slot, nil
 }
 
-// spawnWindow creates a new terminal window with a detached tmux session inside.
-func (s *Server) spawnWindow(workspace, agentType, fullCmd, cwd, taskMarker string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
+// spawnWindow creates a new terminal window with a tmux session running the
+// user's default shell. The agent command is NOT baked into the tmux session
+// command — it is sent via send-keys afterward so that shell init files
+// (.zshrc, .bashrc) are sourced and tool paths (proto, nvm, etc.) are available.
+func (s *Server) spawnWindow(workspace, agentType, cwd, taskMarker string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
 	// Resolve which terminal emulator to use.
-	termClass := s.config.ResolveTerminal()
+	// Prefer the terminal class from the workspace config (matches what the
+	// workspace was saved with), falling back to the global config.
+	termClass := ""
+	if savedWs, err := workspacepkg.Read(workspace); err == nil && len(savedWs.Terminals) > 0 {
+		termClass = savedWs.Terminals[0].WMClass
+	}
+	if termClass == "" {
+		termClass = s.config.ResolveTerminal()
+	}
 	if termClass == "" {
 		return "", 0, fmt.Errorf("no terminal emulator found; configure preferred_terminal or install a supported terminal")
 	}
@@ -149,19 +191,48 @@ func (s *Server) spawnWindow(workspace, agentType, fullCmd, cwd, taskMarker stri
 		return "", 0, fmt.Errorf("no spawn template for terminal class %q; add it to terminal_spawn_commands", termClass)
 	}
 
-	// Peek at the next slot to build the session name before allocating.
-	nextSlot := s.peekNextSlot(workspace)
-	sessionName := agent.SessionName(workspace, nextSlot)
+	slot := s.allocateSlot(workspace, agentType, "", "window", taskMarker, responseFence)
+	registryDesktop := -1
+	registrySlot := -1
+	if wsInfo, err := workspacepkg.GetWorkspaceByName(workspace); err == nil {
+		registryDesktop = wsInfo.Desktop
+		addedSlot, addErr := workspacepkg.AddTerminalToWorkspace(wsInfo.Desktop, true)
+		if addErr != nil {
+			s.removeTracked(workspace, slot)
+			return "", 0, fmt.Errorf("failed to update workspace terminal registry for %q: %w", workspace, addErr)
+		}
+		registrySlot = addedSlot
+		if addedSlot != slot {
+			log.Printf("Warning: MCP slot (%d) differs from workspace slot (%d) for workspace %q", slot, addedSlot, workspace)
+		}
+	} else if workspace != DefaultWorkspace {
+		s.removeTracked(workspace, slot)
+		return "", 0, fmt.Errorf("workspace %q not found in registry: %w", workspace, err)
+	}
+
+	sessionName := agent.SessionName(workspace, slot)
 	sessionTarget := agent.TargetForSession(sessionName)
+	s.updateTmuxTarget(workspace, slot, sessionTarget)
+	success := false
+	defer func() {
+		if !success {
+			s.removeTracked(workspace, slot)
+			if registryDesktop >= 0 && registrySlot >= 0 {
+				if err := workspacepkg.RemoveTerminalFromWorkspace(registryDesktop, registrySlot); err != nil {
+					log.Printf("Warning: failed to roll back workspace terminal registry for workspace %q slot %d: %v", workspace, registrySlot, err)
+				}
+			}
+		}
+	}()
 
 	if cwd == "" {
 		cwd = "."
 	}
 
 	// Build the tmux command that will run inside the terminal window.
-	// The terminal window attaches to this session (no -d flag).
-	tmuxCmd := fmt.Sprintf("tmux new-session -s %s -c %s %s",
-		shellQuote(sessionName), shellQuote(cwd), shellQuote(fullCmd))
+	// Start with the default shell so that init files are sourced.
+	tmuxCmd := fmt.Sprintf("tmux new-session -s %s -c %s",
+		shellQuote(sessionName), shellQuote(cwd))
 
 	// Render the terminal spawn template with the tmux command.
 	argv, err := renderSpawnTemplate(spawnTemplate, cwd, tmuxCmd)
@@ -197,8 +268,7 @@ func (s *Server) spawnWindow(workspace, agentType, fullCmd, cwd, taskMarker stri
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-
-	slot := s.allocateSlot(workspace, agentType, sessionTarget, "window", taskMarker, responseFence)
+	success = true
 
 	// Give the terminal window time to appear as an X11 window, then
 	// ask the termtile daemon to re-tile all terminals.
@@ -206,6 +276,43 @@ func (s *Server) spawnWindow(workspace, agentType, fullCmd, cwd, taskMarker stri
 	s.triggerRetile()
 
 	return sessionTarget, slot, nil
+}
+
+// waitForShellAndSend waits for the default shell to become ready in a new
+// tmux session, then sends the agent command via send-keys. This ensures
+// shell init files (.zshrc/.bashrc) are sourced before the agent starts,
+// making tool paths (proto, nvm, pyenv, etc.) available.
+func (s *Server) waitForShellAndSend(tmuxTarget, agentCmd string) {
+	// Wait for the shell prompt to appear (content stabilizes).
+	deadline := time.Now().Add(10 * time.Second)
+	var lastOutput string
+	stableCount := 0
+	for time.Now().Before(deadline) {
+		out, err := tmuxCapturePane(tmuxTarget, 10)
+		if err != nil {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		trimmed := strings.TrimSpace(out)
+		if trimmed == "" {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		if trimmed == lastOutput {
+			stableCount++
+			if stableCount >= 2 {
+				break
+			}
+		} else {
+			stableCount = 0
+		}
+		lastOutput = trimmed
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if err := tmuxSendKeys(tmuxTarget, agentCmd); err != nil {
+		log.Printf("Warning: failed to send agent command to %s: %v", tmuxTarget, err)
+	}
 }
 
 // waitAndSendTask waits for an agent to become ready, then sends the task text.
@@ -259,14 +366,32 @@ func (s *Server) waitAndSendTask(tmuxTarget, agentType, task string, agentCfg co
 }
 
 func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest, args SendToAgentInput) (*mcpsdk.CallToolResult, any, error) {
-	workspace := resolveWorkspace(args.Workspace)
-	target, ok := s.getTmuxTarget(workspace, args.Slot)
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
-		return nil, nil, fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, args.Slot)
+		return nil, nil, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
-	if err := tmuxSendKeys(target, args.Text); err != nil {
+	textToSend := args.Text
+	taskMarker := ""
+	responseFence := false
+	if args.Text != "" {
+		taskMarker = generateMarker()
+		agentType := s.getAgentType(workspaceName, args.Slot)
+		if agentType != "" {
+			if agentCfg, ok := s.config.Agents[agentType]; ok && agentCfg.ResponseFence {
+				responseFence = true
+				textToSend = wrapTaskWithFence(args.Text)
+			}
+		}
+		textToSend = appendMarker(textToSend, taskMarker)
+	}
+
+	if err := tmuxSendKeys(target, textToSend); err != nil {
 		return nil, nil, fmt.Errorf("failed to send to slot %d (target %s): %w", args.Slot, target, err)
+	}
+	if taskMarker != "" {
+		s.updateOutputConfig(workspaceName, args.Slot, taskMarker, responseFence)
 	}
 
 	return &mcpsdk.CallToolResult{
@@ -277,10 +402,10 @@ func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest,
 }
 
 func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolRequest, args ReadFromAgentInput) (*mcpsdk.CallToolResult, ReadFromAgentOutput, error) {
-	workspace := resolveWorkspace(args.Workspace)
-	target, ok := s.getTmuxTarget(workspace, args.Slot)
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
-		return nil, ReadFromAgentOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, args.Slot)
+		return nil, ReadFromAgentOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
 	lines := args.Lines
@@ -288,7 +413,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		lines = 50
 	}
 
-	marker, fence := s.getOutputConfig(workspace, args.Slot)
+	marker, fence := s.getOutputConfig(workspaceName, args.Slot)
 
 	// When a pattern is provided, poll until it appears or timeout.
 	if args.Pattern != "" {
@@ -340,8 +465,8 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 }
 
 func (s *Server) handleListAgents(_ context.Context, _ *mcpsdk.CallToolRequest, args ListAgentsInput) (*mcpsdk.CallToolResult, ListAgentsOutput, error) {
-	workspace := resolveWorkspace(args.Workspace)
-	tracked := s.getTracked(workspace)
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	tracked := s.getTracked(workspaceName)
 
 	agents := make([]AgentInfo, 0, len(tracked))
 	for slot, ta := range tracked {
@@ -357,7 +482,7 @@ func (s *Server) handleListAgents(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		cmd := exec.Command("tmux", "display-message", "-t", ta.tmuxTarget, "-p", "#{pane_current_command}")
 		if out, err := cmd.Output(); err == nil {
 			info.CurrentCommand = strings.TrimSpace(string(out))
-			info.IsIdle = s.checkIdle(ta.tmuxTarget, ta.agentType)
+			info.IsIdle = s.checkIdle(ta.tmuxTarget, ta.agentType, workspaceName, slot)
 		} else {
 			info.Exists = false
 		}
@@ -371,19 +496,19 @@ func (s *Server) handleListAgents(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	})
 
 	return nil, ListAgentsOutput{
-		Workspace: workspace,
+		Workspace: workspaceName,
 		Agents:    agents,
 	}, nil
 }
 
 func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, args KillAgentInput) (*mcpsdk.CallToolResult, KillAgentOutput, error) {
-	workspace := resolveWorkspace(args.Workspace)
-	target, ok := s.getTmuxTarget(workspace, args.Slot)
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
-		return nil, KillAgentOutput{Killed: false}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, args.Slot)
+		return nil, KillAgentOutput{Killed: false}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
-	mode := s.getSpawnMode(workspace, args.Slot)
+	mode := s.getSpawnMode(workspaceName, args.Slot)
 
 	if mode == "window" {
 		// Window-mode: kill the entire tmux session. The terminal window
@@ -400,7 +525,15 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 	}
 
 	// Always remove tracking — the target may already be gone (killed externally).
-	s.removeTracked(workspace, args.Slot)
+	s.removeTracked(workspaceName, args.Slot)
+
+	if mode == "window" {
+		if wsInfo, err := workspacepkg.GetWorkspaceByName(workspaceName); err == nil {
+			if err := workspacepkg.RemoveTerminalFromWorkspace(wsInfo.Desktop, args.Slot); err != nil {
+				log.Printf("Warning: failed to remove slot %d from workspace registry %q: %v", args.Slot, workspaceName, err)
+			}
+		}
+	}
 
 	// Rebalance remaining panes only for pane-mode agents.
 	// For window-mode agents, re-tile via the daemon to close the visual gap.
@@ -409,7 +542,7 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 		time.Sleep(300 * time.Millisecond)
 		s.triggerRetile()
 	} else {
-		if remainingPane := s.anyPaneModeTarget(workspace); remainingPane != "" {
+		if remainingPane := s.anyPaneModeTarget(workspaceName); remainingPane != "" {
 			_ = exec.Command("tmux", "select-layout", "-t", remainingPane, "tiled").Run()
 		}
 	}
@@ -421,10 +554,10 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 }
 
 func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest, args WaitForIdleInput) (*mcpsdk.CallToolResult, WaitForIdleOutput, error) {
-	workspace := resolveWorkspace(args.Workspace)
-	target, ok := s.getTmuxTarget(workspace, args.Slot)
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
 	if !ok {
-		return nil, WaitForIdleOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, args.Slot)
+		return nil, WaitForIdleOutput{}, fmt.Errorf("no agent tracked in workspace %q slot %d", workspaceName, args.Slot)
 	}
 
 	timeout := time.Duration(args.Timeout) * time.Second
@@ -436,12 +569,12 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 		lines = 100
 	}
 
-	agentType := s.getAgentType(workspace, args.Slot)
-	marker, fence := s.getOutputConfig(workspace, args.Slot)
+	agentType := s.getAgentType(workspaceName, args.Slot)
+	marker, fence := s.getOutputConfig(workspaceName, args.Slot)
 	deadline := time.Now().Add(timeout)
 
 	for {
-		if s.checkIdle(target, agentType) {
+		if s.checkIdle(target, agentType, workspaceName, args.Slot) {
 			output, err := tmuxCapturePane(target, lines)
 			if err != nil {
 				return nil, WaitForIdleOutput{}, fmt.Errorf("failed to capture output from slot %d (target %s): %w", args.Slot, target, err)
@@ -465,4 +598,29 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+func isKnownModel(model string, known []string) bool {
+	for _, k := range known {
+		if strings.TrimSpace(k) == model {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveWorkspaceName returns the provided workspace, or if omitted, the active
+// workspace on the current desktop. Falls back to DefaultWorkspace only when no
+// active workspace is available.
+func resolveWorkspaceName(ws string) string {
+	if strings.TrimSpace(ws) != "" {
+		return ws
+	}
+
+	active, err := workspacepkg.GetActiveWorkspace()
+	if err == nil && strings.TrimSpace(active.Name) != "" {
+		return active.Name
+	}
+
+	return DefaultWorkspace
 }

@@ -96,26 +96,27 @@ type RawLoggingConfig struct {
 }
 
 type RawConfig struct {
-	Include                  IncludeList           `yaml:"include"`
-	Hotkey                   *string               `yaml:"hotkey"`
-	CycleLayoutHotkey        *string               `yaml:"cycle_layout_hotkey"`
-	CycleLayoutReverseHotkey *string               `yaml:"cycle_layout_reverse_hotkey"`
-	UndoHotkey               *string               `yaml:"undo_hotkey"`
-	PaletteHotkey            *string               `yaml:"palette_hotkey"`
-	PaletteBackend           *string               `yaml:"palette_backend"`
-	PreferredTerminal        *string               `yaml:"preferred_terminal"`
-	TerminalSpawnCommands    map[string]string     `yaml:"terminal_spawn_commands"`
-	GapSize                  *int                  `yaml:"gap_size"`
-	ScreenPadding            *RawMargins           `yaml:"screen_padding"`
-	DefaultLayout            *string               `yaml:"default_layout"`
-	Layouts                  map[string]RawLayout  `yaml:"layouts"`
-	TerminalClasses          TerminalClassList     `yaml:"terminal_classes"`
-	TerminalSort             *string               `yaml:"terminal_sort"`
-	LogLevel                 *string               `yaml:"log_level"`
-	TerminalMargins          map[string]RawMargins `yaml:"terminal_margins"`
-	Limits                   *RawLimits                `yaml:"limits"`
-	Logging                  *RawLoggingConfig         `yaml:"logging"`
-	Agents                   map[string]AgentConfig    `yaml:"agents"`
+	Include                  IncludeList            `yaml:"include"`
+	Hotkey                   *string                `yaml:"hotkey"`
+	CycleLayoutHotkey        *string                `yaml:"cycle_layout_hotkey"`
+	CycleLayoutReverseHotkey *string                `yaml:"cycle_layout_reverse_hotkey"`
+	UndoHotkey               *string                `yaml:"undo_hotkey"`
+	PaletteHotkey            *string                `yaml:"palette_hotkey"`
+	PaletteBackend           *string                `yaml:"palette_backend"`
+	PaletteFuzzyMatching     *bool                  `yaml:"palette_fuzzy_matching"`
+	PreferredTerminal        *string                `yaml:"preferred_terminal"`
+	TerminalSpawnCommands    map[string]string      `yaml:"terminal_spawn_commands"`
+	GapSize                  *int                   `yaml:"gap_size"`
+	ScreenPadding            *RawMargins            `yaml:"screen_padding"`
+	DefaultLayout            *string                `yaml:"default_layout"`
+	Layouts                  map[string]RawLayout   `yaml:"layouts"`
+	TerminalClasses          TerminalClassList      `yaml:"terminal_classes"`
+	TerminalSort             *string                `yaml:"terminal_sort"`
+	LogLevel                 *string                `yaml:"log_level"`
+	TerminalMargins          map[string]RawMargins  `yaml:"terminal_margins"`
+	Limits                   *RawLimits             `yaml:"limits"`
+	Logging                  *RawLoggingConfig      `yaml:"logging"`
+	Agents                   map[string]AgentConfig `yaml:"agents"`
 }
 
 func (c RawConfig) merge(overlay RawConfig) RawConfig {
@@ -138,6 +139,9 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 	}
 	if overlay.PaletteBackend != nil {
 		out.PaletteBackend = overlay.PaletteBackend
+	}
+	if overlay.PaletteFuzzyMatching != nil {
+		out.PaletteFuzzyMatching = overlay.PaletteFuzzyMatching
 	}
 	if overlay.PreferredTerminal != nil {
 		out.PreferredTerminal = overlay.PreferredTerminal
@@ -272,6 +276,19 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 			out.Agents = make(map[string]AgentConfig, len(overlay.Agents))
 		}
 		for name, agent := range overlay.Agents {
+			if base, ok := out.Agents[name]; ok {
+				// Keep existing agent replacement behavior, but carry forward
+				// model-related fields when the overlay omits them.
+				if len(agent.Models) == 0 {
+					agent.Models = base.Models
+				}
+				if agent.DefaultModel == "" {
+					agent.DefaultModel = base.DefaultModel
+				}
+				if agent.ModelFlag == "" {
+					agent.ModelFlag = base.ModelFlag
+				}
+			}
 			out.Agents[name] = agent
 		}
 	}

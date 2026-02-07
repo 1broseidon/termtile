@@ -133,31 +133,34 @@ type AgentConfig struct {
 	PromptAsArg   bool              `yaml:"prompt_as_arg,omitempty"`
 	SpawnMode     string            `yaml:"spawn_mode,omitempty"`     // "pane" (default) or "window"
 	ResponseFence bool              `yaml:"response_fence,omitempty"` // prepend task with fence instructions for structured output parsing
+	Models        []string          `yaml:"models,omitempty"`
+	DefaultModel  string            `yaml:"default_model,omitempty"`
+	ModelFlag     string            `yaml:"model_flag,omitempty"`
 }
 
 // Config holds the application configuration.
 type Config struct {
-	Hotkey                   string             `yaml:"hotkey"`
-	CycleLayoutHotkey        string             `yaml:"cycle_layout_hotkey"`
-	CycleLayoutReverseHotkey string             `yaml:"cycle_layout_reverse_hotkey"`
-	UndoHotkey               string             `yaml:"undo_hotkey"`
-	MoveModeHotkey           string             `yaml:"move_mode_hotkey"`
-	MoveModeTimeout          int                `yaml:"move_mode_timeout"`
-	PaletteHotkey            string             `yaml:"palette_hotkey"`
-	PaletteBackend           string             `yaml:"palette_backend"`
-	PaletteFuzzyMatching     bool               `yaml:"palette_fuzzy_matching"`
-	PreferredTerminal        string             `yaml:"preferred_terminal,omitempty"`
-	TerminalSpawnCommands    map[string]string  `yaml:"terminal_spawn_commands"`
-	GapSize                  int                `yaml:"gap_size"`
-	ScreenPadding            Margins            `yaml:"screen_padding"`
-	DefaultLayout            string             `yaml:"default_layout"`
-	Layouts                  map[string]Layout  `yaml:"layouts"`
-	TerminalClasses          TerminalClassList  `yaml:"terminal_classes"`
-	TerminalSort             string             `yaml:"terminal_sort"`
-	LogLevel                 string             `yaml:"log_level"`
-	TerminalMargins          map[string]Margins `yaml:"terminal_margins"`
-	AgentMode                AgentMode          `yaml:"agent_mode"`
-	Limits                   Limits             `yaml:"limits,omitempty"`
+	Hotkey                   string                 `yaml:"hotkey"`
+	CycleLayoutHotkey        string                 `yaml:"cycle_layout_hotkey"`
+	CycleLayoutReverseHotkey string                 `yaml:"cycle_layout_reverse_hotkey"`
+	UndoHotkey               string                 `yaml:"undo_hotkey"`
+	MoveModeHotkey           string                 `yaml:"move_mode_hotkey"`
+	MoveModeTimeout          int                    `yaml:"move_mode_timeout"`
+	PaletteHotkey            string                 `yaml:"palette_hotkey"`
+	PaletteBackend           string                 `yaml:"palette_backend"`
+	PaletteFuzzyMatching     bool                   `yaml:"palette_fuzzy_matching"`
+	PreferredTerminal        string                 `yaml:"preferred_terminal,omitempty"`
+	TerminalSpawnCommands    map[string]string      `yaml:"terminal_spawn_commands"`
+	GapSize                  int                    `yaml:"gap_size"`
+	ScreenPadding            Margins                `yaml:"screen_padding"`
+	DefaultLayout            string                 `yaml:"default_layout"`
+	Layouts                  map[string]Layout      `yaml:"layouts"`
+	TerminalClasses          TerminalClassList      `yaml:"terminal_classes"`
+	TerminalSort             string                 `yaml:"terminal_sort"`
+	LogLevel                 string                 `yaml:"log_level"`
+	TerminalMargins          map[string]Margins     `yaml:"terminal_margins"`
+	AgentMode                AgentMode              `yaml:"agent_mode"`
+	Limits                   Limits                 `yaml:"limits,omitempty"`
 	Logging                  LoggingConfig          `yaml:"logging,omitempty"`
 	Agents                   map[string]AgentConfig `yaml:"agents,omitempty"`
 }
@@ -169,6 +172,8 @@ func DefaultConfig() *Config {
 		MoveModeTimeout: 10,            // 10 seconds default timeout
 		PaletteHotkey:   "Mod4-Mod1-g", // Super+Alt+G for palette
 		PaletteBackend:  "auto",
+		// Disabled by default to preserve existing match behavior.
+		PaletteFuzzyMatching: false,
 		TerminalSpawnCommands: map[string]string{
 			"kitty":                 "kitty --directory {{dir}} {{cmd}}",
 			"Alacritty":             "alacritty --working-directory {{dir}} -e {{cmd}}",
@@ -206,22 +211,27 @@ func DefaultConfig() *Config {
 				Command:       "claude",
 				Args:          []string{"--dangerously-skip-permissions"},
 				Description:   "Claude Code CLI agent",
+				SpawnMode:     "window",
 				PromptAsArg:   true,
 				IdlePattern:   "\u276f", // ❯ (U+276F) Claude Code input prompt
 				ResponseFence: true,
+				Models:        []string{"sonnet", "haiku", "opus"},
 			},
 			"codex": {
 				Command:       "codex",
-				Args:          []string{"--full-auto"},
+				Args:          []string{"--full-auto", "-c", "notice.model_migrations={}", "-c", "notice.hide_rate_limit_switch_prompt=true"},
 				Description:   "OpenAI Codex CLI agent",
+				SpawnMode:     "window",
 				PromptAsArg:   true,
 				IdlePattern:   "\u203a", // › (U+203A) Codex input prompt
 				ResponseFence: true,
+				Models:        []string{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.1-codex-max", "gpt-5.2", "gpt-5.1-codex-mini"},
 			},
 			"gemini": {
 				Command:       "gemini",
 				Args:          []string{},
 				Description:   "Google Gemini CLI",
+				SpawnMode:     "window",
 				PromptAsArg:   true,
 				IdlePattern:   ">", // Gemini input prompt
 				ResponseFence: true,
@@ -230,6 +240,7 @@ func DefaultConfig() *Config {
 				Command:       "cursor-agent",
 				Args:          []string{},
 				Description:   "Cursor AI agent CLI",
+				SpawnMode:     "window",
 				PromptAsArg:   true,
 				IdlePattern:   "\u2192", // → (U+2192) Cursor agent input prompt
 				ResponseFence: true,

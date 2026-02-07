@@ -274,6 +274,27 @@ func TestTrimOutput(t *testing.T) {
 			responseFence: false,
 			want:          "banner\nresult",
 		},
+		{
+			name:          "marker not found with fence skips fence extraction (prevents 'and' bug)",
+			output:        "wrap inside [termtile-response] and [/termtile-response] tags\nWhat is 10 + 20\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n❯ ",
+			marker:        "[agent:ffffffff]",
+			responseFence: true,
+			want:          "wrap inside [termtile-response] and [/termtile-response] tags\nWhat is 10 + 20\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n❯ ",
+		},
+		{
+			name:          "instruction fence tags without marker returns raw output not 'and'",
+			output:        "IMPORTANT: wrap inside [termtile-response] and [/termtile-response] tags\nfix the bug",
+			marker:        "[agent:abc12345]",
+			responseFence: true,
+			want:          "IMPORTANT: wrap inside [termtile-response] and [/termtile-response] tags\nfix the bug",
+		},
+		{
+			name:          "duplicate marker with fence instruction in between extracts correct response",
+			output:        "shell> [agent:abc12345]'\nbanner\n[termtile-response] and [/termtile-response] tags\ntask text\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n› ",
+			marker:        "[agent:abc12345]",
+			responseFence: true,
+			want:          "30",
+		},
 	}
 
 	for _, tt := range tests {
@@ -299,54 +320,71 @@ func TestWrapTaskWithFence(t *testing.T) {
 
 func TestTrimToAfterMarker(t *testing.T) {
 	tests := []struct {
-		name   string
-		output string
-		marker string
-		want   string
+		name      string
+		output    string
+		marker    string
+		want      string
+		wantFound bool
 	}{
 		{
-			name:   "empty marker returns full output",
-			output: "banner\nstuff\nresult",
-			marker: "",
-			want:   "banner\nstuff\nresult",
+			name:      "empty marker returns full output",
+			output:    "banner\nstuff\nresult",
+			marker:    "",
+			want:      "banner\nstuff\nresult",
+			wantFound: false,
 		},
 		{
-			name:   "no match returns full output",
-			output: "banner\nstuff\nresult",
-			marker: "[agent:ffffffff]",
-			want:   "banner\nstuff\nresult",
+			name:      "no match returns full output",
+			output:    "banner\nstuff\nresult",
+			marker:    "[agent:ffffffff]",
+			want:      "banner\nstuff\nresult",
+			wantFound: false,
 		},
 		{
-			name:   "trims everything before and including marker line",
-			output: "Welcome to Claude!\nTips: ...\nfix the auth bug\n[agent:abc12345]\nI'll fix the auth bug now.\nDone.",
-			marker: "[agent:abc12345]",
-			want:   "I'll fix the auth bug now.\nDone.",
+			name:      "trims everything before and including marker line",
+			output:    "Welcome to Claude!\nTips: ...\nfix the auth bug\n[agent:abc12345]\nI'll fix the auth bug now.\nDone.",
+			marker:    "[agent:abc12345]",
+			want:      "I'll fix the auth bug now.\nDone.",
+			wantFound: true,
 		},
 		{
-			name:   "marker at end leaves empty output",
-			output: "banner\n[agent:abc12345]",
-			marker: "[agent:abc12345]",
-			want:   "",
+			name:      "marker at end leaves empty output",
+			output:    "banner\n[agent:abc12345]",
+			marker:    "[agent:abc12345]",
+			want:      "",
+			wantFound: true,
 		},
 		{
-			name:   "strips leading newlines from result",
-			output: "banner\n[agent:abc12345]\n\n\nresponse",
-			marker: "[agent:abc12345]",
-			want:   "response",
+			name:      "strips leading newlines from result",
+			output:    "banner\n[agent:abc12345]\n\n\nresponse",
+			marker:    "[agent:abc12345]",
+			want:      "response",
+			wantFound: true,
 		},
 		{
-			name:   "marker embedded in line with other text",
-			output: "banner\n> [agent:abc12345]\nresponse here",
-			marker: "[agent:abc12345]",
-			want:   "response here",
+			name:      "marker embedded in line with other text",
+			output:    "banner\n> [agent:abc12345]\nresponse here",
+			marker:    "[agent:abc12345]",
+			want:      "response here",
+			wantFound: true,
+		},
+		{
+			name:      "duplicate markers uses last occurrence (shell echo + TUI echo)",
+			output:    "shell> [agent:abc12345]'\nbanner\ninstruction noise\n  [agent:abc12345]\nactual response",
+			marker:    "[agent:abc12345]",
+			want:      "actual response",
+			wantFound: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := trimToAfterMarker(tt.output, tt.marker)
+			got, found := trimToAfterMarker(tt.output, tt.marker)
 			if got != tt.want {
 				t.Errorf("trimToAfterMarker() =\n%q\nwant:\n%q", got, tt.want)
+			}
+			if found != tt.wantFound {
+				t.Errorf("trimToAfterMarker() found = %v, want %v", found, tt.wantFound)
 			}
 		})
 	}

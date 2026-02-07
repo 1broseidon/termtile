@@ -4,15 +4,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/1broseidon/termtile/internal/x11"
-	"github.com/BurntSushi/xgb/xproto"
-	"github.com/BurntSushi/xgbutil/ewmh"
-	"github.com/BurntSushi/xgbutil/icccm"
+	"github.com/1broseidon/termtile/internal/platform"
 )
 
 // TerminalWindow represents a detected terminal window
 type TerminalWindow struct {
-	WindowID xproto.Window
+	WindowID platform.WindowID
 	Class    string
 	X        int
 	Y        int
@@ -53,67 +50,37 @@ func (d *Detector) UpdateTerminalClasses(terminalClasses []string) {
 	d.terminalClasses = classMap
 }
 
-// FindTerminals finds all terminal windows on the specified monitor
-func (d *Detector) FindTerminals(conn *x11.Connection, monitor *x11.Monitor) ([]TerminalWindow, error) {
-	// Get all client windows
-	clients, err := ewmh.ClientListGet(conn.XUtil)
+// FindTerminals finds all terminal windows on the specified display within the given bounds.
+// The bounds parameter is used to filter windows whose center falls inside that rectangle
+// (typically the padded monitor area).
+func (d *Detector) FindTerminals(backend platform.Backend, displayID int, bounds platform.Rect) ([]TerminalWindow, error) {
+	windows, err := backend.ListWindowsOnDisplay(displayID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Only include windows on the current desktop (plus sticky windows).
-	currentDesktop, err := ewmh.CurrentDesktopGet(conn.XUtil)
-	hasCurrentDesktop := err == nil
-
 	var terminals []TerminalWindow
-
-	for _, windowID := range clients {
-		// Skip docks/desktops/notifications, etc.
-		if !conn.IsNormalWindow(windowID) {
-			continue
-		}
-
-		// Filter to the current desktop/workspace.
-		if hasCurrentDesktop && !isOnCurrentDesktop(conn, windowID, currentDesktop) {
-			continue
-		}
-
-		// Skip minimized/hidden/fullscreen windows.
-		if shouldSkipByState(conn, windowID) {
-			continue
-		}
-
-		// Get WM_CLASS property
-		wmClass, err := icccm.WmClassGet(conn.XUtil, windowID)
-		if err != nil {
-			continue
-		}
-
+	for _, w := range windows {
 		// Check if this is a terminal
-		if !d.isTerminalClass(wmClass.Class) {
+		if !d.isTerminalClass(w.AppID) {
 			continue
 		}
 
-		winX, winY, winW, winH, ok := getWindowRect(conn, windowID)
-		if !ok {
-			continue
-		}
-
-		// Check if window is on this monitor
-		winCenterX := winX + winW/2
-		winCenterY := winY + winH/2
-		if winCenterX < monitor.X || winCenterX >= monitor.X+monitor.Width ||
-			winCenterY < monitor.Y || winCenterY >= monitor.Y+monitor.Height {
+		// Check if window center is within bounds
+		centerX := w.Bounds.X + w.Bounds.Width/2
+		centerY := w.Bounds.Y + w.Bounds.Height/2
+		if centerX < bounds.X || centerX >= bounds.X+bounds.Width ||
+			centerY < bounds.Y || centerY >= bounds.Y+bounds.Height {
 			continue
 		}
 
 		terminals = append(terminals, TerminalWindow{
-			WindowID: windowID,
-			Class:    wmClass.Class,
-			X:        winX,
-			Y:        winY,
-			Width:    winW,
-			Height:   winH,
+			WindowID: w.ID,
+			Class:    w.AppID,
+			X:        w.Bounds.X,
+			Y:        w.Bounds.Y,
+			Width:    w.Bounds.Width,
+			Height:   w.Bounds.Height,
 		})
 	}
 
@@ -131,54 +98,4 @@ func (d *Detector) isTerminalClass(class string) bool {
 	}
 	// Check lowercase match
 	return d.terminalClasses[strings.ToLower(class)]
-}
-
-func getWindowRect(conn *x11.Connection, windowID xproto.Window) (x, y, width, height int, ok bool) {
-	geom, err := xproto.GetGeometry(conn.XUtil.Conn(), xproto.Drawable(windowID)).Reply()
-	if err != nil {
-		return 0, 0, 0, 0, false
-	}
-
-	translate, err := xproto.TranslateCoordinates(
-		conn.XUtil.Conn(),
-		windowID,
-		conn.Root,
-		0, 0,
-	).Reply()
-	if err != nil {
-		return 0, 0, 0, 0, false
-	}
-
-	return int(translate.DstX), int(translate.DstY), int(geom.Width), int(geom.Height), true
-}
-
-// isMinimized checks if a window is minimized/hidden
-func isOnCurrentDesktop(conn *x11.Connection, windowID xproto.Window, currentDesktop uint) bool {
-	desktop, err := ewmh.WmDesktopGet(conn.XUtil, windowID)
-	if err != nil {
-		// If we can't determine, be permissive.
-		return true
-	}
-
-	// 0xFFFFFFFF means "sticky" (visible on all desktops).
-	if desktop == uint(0xFFFFFFFF) {
-		return true
-	}
-
-	return desktop == currentDesktop
-}
-
-func shouldSkipByState(conn *x11.Connection, windowID xproto.Window) bool {
-	states, err := ewmh.WmStateGet(conn.XUtil, windowID)
-	if err != nil {
-		return false
-	}
-
-	for _, state := range states {
-		switch state {
-		case "_NET_WM_STATE_HIDDEN", "_NET_WM_STATE_FULLSCREEN":
-			return true
-		}
-	}
-	return false
 }

@@ -12,8 +12,8 @@ import (
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/ipc"
 	"github.com/1broseidon/termtile/internal/palette"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/workspace"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 func runPalette(args []string) int {
@@ -90,7 +90,7 @@ func buildContextMessage(cfg *config.Config) string {
 	var parts []string
 
 	// Current desktop
-	if desktop, err := x11.GetCurrentDesktopStandalone(); err == nil {
+	if desktop, err := platform.GetCurrentDesktopStandalone(); err == nil {
 		parts = append(parts, fmt.Sprintf("Desktop %d", desktop))
 	}
 
@@ -119,7 +119,7 @@ func buildContextMessage(cfg *config.Config) string {
 }
 
 func buildPaletteMessage(contextLine string) string {
-	const hints = "<span size='small'>Alt+Enter: edit | Alt+d: delete</span>"
+	const hints = "<span size='small'>Alt+Enter: secondary action | Alt+d: delete</span>"
 
 	contextLine = strings.TrimSpace(contextLine)
 	if contextLine == "" {
@@ -213,8 +213,15 @@ func buildWorkspacesMenu() []palette.MenuItem {
 
 	// Get current desktop for context
 	currentDesktop := 0
-	if d, err := x11.GetCurrentDesktopStandalone(); err == nil {
+	if d, err := platform.GetCurrentDesktopStandalone(); err == nil {
 		currentDesktop = d
+	} else {
+		items = append(items, palette.MenuItem{
+			Label:    "(failed to query current desktop)",
+			Action:   "noop",
+			Icon:     "dialog-warning",
+			IsHeader: true,
+		})
 	}
 
 	// Get all open workspaces
@@ -229,7 +236,15 @@ func buildWorkspacesMenu() []palette.MenuItem {
 	}
 
 	// Get current desktop's workspace (if any)
-	currentWs, _ := workspace.GetActiveWorkspace()
+	currentWs, currentWsErr := workspace.GetActiveWorkspace()
+	if currentWsErr != nil {
+		items = append(items, palette.MenuItem{
+			Label:    "(failed to query active workspace)",
+			Action:   "noop",
+			Icon:     "dialog-warning",
+			IsHeader: true,
+		})
+	}
 
 	// If workspace on current desktop, show context menu for it
 	if currentWs.Name != "" {

@@ -5,7 +5,6 @@ import (
 	"math"
 
 	"github.com/1broseidon/termtile/internal/config"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 // Rect represents a window position and size
@@ -32,7 +31,7 @@ func CalculateGrid(numWindows int) (rows, cols int) {
 }
 
 // CalculatePositions computes window positions for a grid layout with gaps
-func CalculatePositions(numWindows int, monitor x11.Monitor, gapSize int) []Rect {
+func CalculatePositions(numWindows int, monitor Rect, gapSize int) []Rect {
 	if numWindows == 0 {
 		return nil
 	}
@@ -71,7 +70,7 @@ func CalculatePositions(numWindows int, monitor x11.Monitor, gapSize int) []Rect
 // CalculatePositionsWithLayout computes window positions using layout configuration
 func CalculatePositionsWithLayout(
 	numWindows int,
-	monitor x11.Monitor,
+	monitor Rect,
 	layout *config.Layout,
 	gapSize int,
 ) ([]Rect, error) {
@@ -207,7 +206,7 @@ func CalculatePositionsWithLayout(
 }
 
 // ApplyRegion applies the tile region to a monitor, returning adjusted bounds
-func ApplyRegion(monitor x11.Monitor, region config.TileRegion) x11.Monitor {
+func ApplyRegion(monitor Rect, region config.TileRegion) Rect {
 	adjusted := monitor
 
 	switch region.Type {

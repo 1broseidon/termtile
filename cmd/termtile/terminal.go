@@ -14,9 +14,8 @@ import (
 	"github.com/1broseidon/termtile/internal/agent"
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/ipc"
-	"github.com/1broseidon/termtile/internal/terminals"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/workspace"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 var (
@@ -496,7 +495,7 @@ func runTerminalAdd(args []string) int {
 
 	// IMPORTANT: Capture desktop immediately to avoid race conditions
 	// if user switches desktops while command is running
-	capturedDesktop, desktopErr := x11.GetCurrentDesktopStandalone()
+	capturedDesktop, desktopErr := platform.GetCurrentDesktopStandalone()
 	if desktopErr != nil {
 		fmt.Fprintf(os.Stderr, "failed to detect current desktop: %v\n", desktopErr)
 		return 1
@@ -585,18 +584,15 @@ func runTerminalAdd(args []string) int {
 		}
 	}
 
-	// Connect to X11
-	conn, err := x11.NewConnection()
+	// Connect to display
+	backend, err := platform.NewLinuxBackendFromDisplay()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	defer conn.Close()
+	defer backend.Disconnect()
 
-	lister := &x11TerminalLister{
-		conn:     conn,
-		detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-	}
+	lister := newTerminalLister(backend, res.Config)
 
 	applier := &ipcLayoutApplier{client: ipc.NewClient()}
 	if err := applier.client.Ping(); err != nil {
@@ -797,7 +793,7 @@ func runTerminalRemove(args []string) int {
 
 	// IMPORTANT: Capture desktop immediately to avoid race conditions
 	// if user switches desktops while command is running
-	capturedDesktop, desktopErr := x11.GetCurrentDesktopStandalone()
+	capturedDesktop, desktopErr := platform.GetCurrentDesktopStandalone()
 	if desktopErr != nil {
 		fmt.Fprintf(os.Stderr, "failed to detect current desktop: %v\n", desktopErr)
 		return 1
@@ -869,18 +865,15 @@ func runTerminalRemove(args []string) int {
 		}
 	}
 
-	// Connect to X11
-	conn, err := x11.NewConnection()
+	// Connect to display
+	backend, err := platform.NewLinuxBackendFromDisplay()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	defer conn.Close()
+	defer backend.Disconnect()
 
-	lister := &x11TerminalLister{
-		conn:     conn,
-		detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-	}
+	lister := newTerminalLister(backend, res.Config)
 
 	// Get current terminals
 	windows, err := lister.ListTerminals()
@@ -895,7 +888,7 @@ func runTerminalRemove(args []string) int {
 	}
 
 	// For agent-mode terminals, killing tmux will close the window automatically
-	// For non-agent terminals, we need to close the window via X11
+	// For non-agent terminals, we need to close the window via the backend
 	if hasSession {
 		// Kill tmux session - this will close the terminal window automatically
 		if err := exec.Command("tmux", "kill-session", "-t", session).Run(); err != nil {
@@ -904,9 +897,9 @@ func runTerminalRemove(args []string) int {
 		// Give the window time to close
 		time.Sleep(200 * time.Millisecond)
 	} else {
-		// No tmux session - close the window via X11
+		// No tmux session - close the window via platform backend
 		targetWindow := windows[targetSlot]
-		if err := closeWindow(conn, targetWindow.WindowID); err != nil {
+		if err := closeWindowViaBackend(backend, targetWindow.WindowID); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to close window: %v\n", err)
 			return 1
 		}

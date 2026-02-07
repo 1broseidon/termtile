@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/1broseidon/termtile/internal/config"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/tiling"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 // Server handles IPC requests from clients
@@ -25,7 +25,7 @@ type Server struct {
 	cfg          *config.Config
 	cfgMu        sync.RWMutex
 	tiler        *tiling.Tiler
-	conn         *x11.Connection
+	backend      platform.Backend
 	startTime    time.Time
 	reloadChan   chan struct{}
 	shuttingDown bool
@@ -33,7 +33,7 @@ type Server struct {
 }
 
 // NewServer creates a new IPC server
-func NewServer(cfg *config.Config, tiler *tiling.Tiler, conn *x11.Connection, reloadChan chan struct{}) (*Server, error) {
+func NewServer(cfg *config.Config, tiler *tiling.Tiler, backend platform.Backend, reloadChan chan struct{}) (*Server, error) {
 	// Get user-specific socket path
 	uid := os.Getuid()
 	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -51,7 +51,7 @@ func NewServer(cfg *config.Config, tiler *tiling.Tiler, conn *x11.Connection, re
 		socketPath: socketPath,
 		cfg:        cfg,
 		tiler:      tiler,
-		conn:       conn,
+		backend:    backend,
 		startTime:  time.Now(),
 		reloadChan: reloadChan,
 	}, nil
@@ -187,10 +187,10 @@ func (s *Server) handleReload() *Response {
 // handleGetStatus returns current daemon status
 func (s *Server) handleGetStatus() *Response {
 	// Get active monitor workspace
-	monitor, err := s.conn.GetActiveMonitor()
+	display, err := s.backend.ActiveDisplay()
 	terminalCount := 0
 	if err == nil {
-		terminalCount = s.tiler.GetTerminalCount(monitor.ID)
+		terminalCount = s.tiler.GetTerminalCount(display.ID)
 	}
 
 	status := StatusData{
@@ -206,20 +206,20 @@ func (s *Server) handleGetStatus() *Response {
 
 // handleGetMonitors returns information about all monitors
 func (s *Server) handleGetMonitors() *Response {
-	monitors, err := s.conn.GetMonitors()
+	displays, err := s.backend.Displays()
 	if err != nil {
 		return NewErrorResponse(fmt.Sprintf("Failed to get monitors: %v", err))
 	}
 
-	monitorInfos := make([]MonitorInfo, len(monitors))
-	for i, m := range monitors {
+	monitorInfos := make([]MonitorInfo, len(displays))
+	for i, d := range displays {
 		monitorInfos[i] = MonitorInfo{
-			ID:     m.ID,
-			Name:   m.Name,
-			X:      m.X,
-			Y:      m.Y,
-			Width:  m.Width,
-			Height: m.Height,
+			ID:     d.ID,
+			Name:   d.Name,
+			X:      d.Bounds.X,
+			Y:      d.Bounds.Y,
+			Width:  d.Bounds.Width,
+			Height: d.Bounds.Height,
 		}
 	}
 

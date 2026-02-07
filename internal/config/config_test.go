@@ -35,6 +35,22 @@ func TestLoadFromPath_EmptyFileUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadFromPath_PaletteFuzzyMatching(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("palette_fuzzy_matching: true\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !res.Config.PaletteFuzzyMatching {
+		t.Fatalf("expected palette_fuzzy_matching to be true")
+	}
+}
+
 func TestLoadFromPath_StrictUnknownKeyErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

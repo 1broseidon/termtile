@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/workspace"
 )
 
@@ -128,4 +131,31 @@ func (r *Reconciler) reconcile() {
 // ReconcileNow triggers an immediate reconciliation pass.
 func (r *Reconciler) ReconcileNow() {
 	r.reconcile()
+}
+
+// WindowListerFromBackend creates a reconciler WindowLister from a platform backend.
+func WindowListerFromBackend(backend platform.Backend) WindowLister {
+	return func() ([]uint32, error) {
+		if backend == nil {
+			return nil, fmt.Errorf("platform backend is nil")
+		}
+
+		display, err := backend.ActiveDisplay()
+		if err != nil {
+			return nil, err
+		}
+
+		windows, err := backend.ListWindowsOnDisplay(display.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]uint32, 0, len(windows))
+		for _, w := range windows {
+			ids = append(ids, uint32(w.ID))
+		}
+
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		return ids, nil
+	}
 }

@@ -21,12 +21,11 @@ import (
 	"github.com/1broseidon/termtile/internal/hotkeys"
 	"github.com/1broseidon/termtile/internal/ipc"
 	"github.com/1broseidon/termtile/internal/movemode"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
 	"github.com/1broseidon/termtile/internal/tiling"
 	"github.com/1broseidon/termtile/internal/tui"
 	"github.com/1broseidon/termtile/internal/workspace"
-	"github.com/1broseidon/termtile/internal/x11"
-	"github.com/BurntSushi/xgbutil/ewmh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -708,32 +707,31 @@ func runDaemon() {
 	}
 	log.Printf("Configuration loaded (hotkey: %s, gap: %dpx)", cfg.Hotkey, cfg.GapSize)
 
-	// Connect to X11 server
-	conn, err := x11.NewConnection()
+	// Connect to display server
+	backend, err := platform.NewLinuxBackendFromDisplay()
 	if err != nil {
-		log.Fatalf("Failed to connect to X11: %v", err)
+		log.Fatalf("Failed to connect to display: %v", err)
 	}
-	defer conn.Close()
+	defer backend.Disconnect()
 
 	log.Println("termtile daemon started successfully")
-	log.Printf("Connected to X11 (Root window: %d)", conn.Root)
 
 	// Create terminal detector
 	detector := terminals.NewDetector(cfg.TerminalClassNames())
 	log.Printf("Terminal detector initialized with %d terminal classes", len(cfg.TerminalClasses))
 
 	// Create tiler
-	tiler := tiling.NewTiler(conn, detector, cfg)
+	tiler := tiling.NewTiler(backend, detector, cfg)
 	log.Println("Tiler initialized")
 
 	// Setup hotkey handler
-	hotkeyHandler := hotkeys.NewHandler(conn, tiler)
+	hotkeyHandler := hotkeys.NewHandler(backend, tiler)
 	if err := hotkeyHandler.Register(cfg.Hotkey); err != nil {
 		log.Fatalf("Failed to register hotkey: %v", err)
 	}
 
 	// Create and register move mode
-	moveModeCtrl := movemode.NewMode(conn, detector, cfg, tiler)
+	moveModeCtrl := movemode.NewMode(backend, detector, cfg, tiler)
 	hotkeyHandler.SetMoveMode(moveModeCtrl)
 
 	// Wire up callback to rename tmux sessions after window moves
@@ -819,7 +817,7 @@ func runDaemon() {
 	reloadChan := make(chan struct{}, 1)
 
 	// Start IPC server
-	ipcServer, err := ipc.NewServer(cfg, tiler, conn, reloadChan)
+	ipcServer, err := ipc.NewServer(cfg, tiler, backend, reloadChan)
 	if err != nil {
 		log.Fatalf("Failed to create IPC server: %v", err)
 	}
@@ -835,17 +833,7 @@ func runDaemon() {
 	stateSynchronizer := daemon.NewStateSynchronizer(syncLogger)
 
 	// Create window lister function for reconciler
-	windowLister := func() ([]uint32, error) {
-		clients, err := ewmh.ClientListGet(conn.XUtil)
-		if err != nil {
-			return nil, err
-		}
-		ids := make([]uint32, len(clients))
-		for i, wid := range clients {
-			ids[i] = uint32(wid)
-		}
-		return ids, nil
-	}
+	windowLister := daemon.WindowListerFromBackend(backend)
 
 	reconciler := daemon.NewReconciler(daemon.ReconcilerConfig{
 		Interval:        10 * time.Second,
@@ -907,7 +895,7 @@ func runDaemon() {
 		}
 	}()
 
-	// Start X11 event loop (blocking)
+	// Start event loop (blocking)
 	log.Println("Entering event loop...")
-	conn.EventLoop()
+	backend.EventLoop()
 }

@@ -249,20 +249,24 @@ func (b *dmenuLikeBackend) formatInput(items []Item) (string, rowStates) {
 	var states rowStates
 	firstSelectable := -1
 	firstActiveSelectable := -1
-	seen := make(map[string]int)
 
-	for i := range items {
-		if items[i].IsHeader || items[i].IsDivider {
-			continue
+	// Backends that match by visible text (dmenu/wofi) need label disambiguation.
+	// Index-output backends (rofi/fuzzel) select by row index and do not.
+	if !b.caps.IndexOutput {
+		seen := make(map[string]int)
+		for i := range items {
+			if items[i].IsHeader || items[i].IsDivider {
+				continue
+			}
+			key := sanitizeLabel(items[i].Label)
+			if key == "" {
+				continue
+			}
+			if count := seen[key]; count > 0 {
+				items[i].Label = fmt.Sprintf("%s (%d)", key, count+1)
+			}
+			seen[key]++
 		}
-		key := sanitizeLabel(items[i].Label)
-		if key == "" {
-			continue
-		}
-		if count := seen[key]; count > 0 {
-			items[i].Label = fmt.Sprintf("%s (%d)", key, count+1)
-		}
-		seen[key]++
 	}
 
 	for i, item := range items {

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/1broseidon/termtile/internal/movemode"
-	"github.com/1broseidon/termtile/internal/x11"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/keybind"
@@ -18,9 +18,16 @@ type Tiler interface {
 	TileCurrentMonitor() error
 }
 
+// x11Accessor is an optional interface for backends that expose X11 internals.
+type x11Accessor interface {
+	XUtil() *xgbutil.XUtil
+	RootWindow() xproto.Window
+}
+
 // Handler manages global keyboard shortcuts
 type Handler struct {
-	conn     *x11.Connection
+	xu       *xgbutil.XUtil
+	root     xproto.Window
 	tiler    Tiler
 	moveMode *movemode.Mode
 }
@@ -28,13 +35,21 @@ type Handler struct {
 var ignoreModsOnce sync.Once
 
 // NewHandler creates a new hotkey handler.
-func NewHandler(conn *x11.Connection, tiler Tiler) *Handler {
+func NewHandler(backend platform.Backend, tiler Tiler) *Handler {
+	var xu *xgbutil.XUtil
+	var root xproto.Window
+	if accessor, ok := backend.(x11Accessor); ok {
+		xu = accessor.XUtil()
+		root = accessor.RootWindow()
+	}
+
 	ignoreModsOnce.Do(func() {
-		configureIgnoreMods(conn.XUtil)
+		configureIgnoreMods(xu)
 	})
 
 	return &Handler{
-		conn:  conn,
+		xu:    xu,
+		root:  root,
 		tiler: tiler,
 	}
 }
@@ -83,7 +98,7 @@ func (h *Handler) RegisterMoveMode(keySequence string) error {
 func (h *Handler) RegisterFunc(keySequence string, callback func()) error {
 	return keybind.KeyPressFun(func(xu *xgbutil.XUtil, ev xevent.KeyPressEvent) {
 		callback()
-	}).Connect(h.conn.XUtil, h.conn.Root, keySequence, true)
+	}).Connect(h.xu, h.root, keySequence, true)
 }
 
 func configureIgnoreMods(xu *xgbutil.XUtil) {

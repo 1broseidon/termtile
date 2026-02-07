@@ -1,9 +1,9 @@
 package movemode
 
 import (
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
 	"github.com/1broseidon/termtile/internal/tiling"
-	"github.com/BurntSushi/xgb/xproto"
 )
 
 // Phase represents the current phase of move mode
@@ -52,13 +52,13 @@ type TerminalSlot struct {
 // State holds the current move mode state
 type State struct {
 	Phase           Phase
-	SelectedIndex   int              // Index of highlighted terminal in Terminals slice
-	GrabbedWindow   xproto.Window    // Window ID of grabbed window (0 if none)
-	TargetSlotIndex int              // Target slot index for grabbed window
-	Terminals       []TerminalSlot   // Windows with slot assignments
-	SlotPositions   []tiling.Rect    // Grid slot geometries
-	GridRows        int              // Number of rows in the grid
-	GridCols        int              // Number of columns in the grid
+	SelectedIndex   int                // Index of highlighted terminal in Terminals slice
+	GrabbedWindow   platform.WindowID  // Window ID of grabbed window (0 if none)
+	TargetSlotIndex int                // Target slot index for grabbed window
+	Terminals       []TerminalSlot     // Windows with slot assignments
+	SlotPositions   []tiling.Rect      // Grid slot geometries
+	GridRows        int                // Number of rows in the grid
+	GridCols        int                // Number of columns in the grid
 }
 
 // NewState creates a new inactive state

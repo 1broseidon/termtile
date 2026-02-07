@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/1broseidon/termtile/internal/x11"
+	"github.com/1broseidon/termtile/internal/platform"
 )
 
 // WorkspaceInfo holds information about an active workspace on a specific desktop.
@@ -122,7 +122,7 @@ func saveRegistry(registry *workspaceRegistry) error {
 // If agentSlots is provided and agentMode is true, the slots are recorded.
 func SetActiveWorkspace(name string, terminalCount int, agentMode bool, desktop int, agentSlots []int) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			// Fallback to desktop 0 with warning
 			fmt.Fprintf(os.Stderr, "warning: failed to detect current desktop, using 0: %v\n", err)
@@ -167,7 +167,7 @@ func SetActiveWorkspace(name string, terminalCount int, agentMode bool, desktop 
 // GetActiveWorkspace returns the workspace on the current desktop (auto-detected).
 // Returns empty WorkspaceInfo if no workspace on current desktop.
 func GetActiveWorkspace() (WorkspaceInfo, error) {
-	desktop, err := x11.GetCurrentDesktopStandalone()
+	desktop, err := platform.GetCurrentDesktopStandalone()
 	if err != nil {
 		// Fallback to desktop 0 with warning
 		fmt.Fprintf(os.Stderr, "warning: failed to detect current desktop, using 0: %v\n", err)
@@ -219,7 +219,7 @@ func GetAllWorkspaces() (map[int]WorkspaceInfo, error) {
 // If desktop is -1, clear workspace on current desktop.
 func ClearWorkspace(desktop int) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			// Fallback to desktop 0 with warning
 			fmt.Fprintf(os.Stderr, "warning: failed to detect current desktop, using 0: %v\n", err)
@@ -250,7 +250,7 @@ func ClearActiveWorkspace() error {
 // If desktop is -1, auto-detect current desktop.
 func RemoveTerminalFromWorkspace(desktop int, slot int) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			return fmt.Errorf("failed to detect current desktop: %w", err)
 		}
@@ -296,7 +296,7 @@ func RemoveTerminalFromWorkspace(desktop int, slot int) error {
 // If desktop is -1, auto-detect current desktop.
 func InsertTerminalAtSlot(desktop int, insertSlot int, agentSlot bool) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			return fmt.Errorf("failed to detect current desktop: %w", err)
 		}
@@ -345,7 +345,7 @@ func InsertTerminalAtSlot(desktop int, insertSlot int, agentSlot bool) error {
 // If desktop is -1, auto-detect current desktop.
 func AddTerminalToWorkspace(desktop int, agentSlot bool) (int, error) {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			return -1, fmt.Errorf("failed to detect current desktop: %w", err)
 		}
@@ -383,7 +383,7 @@ func AddTerminalToWorkspace(desktop int, agentSlot bool) (int, error) {
 // If desktop is -1, auto-detect current desktop.
 func SwapSlotsInRegistry(desktop, slotA, slotB int) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			return fmt.Errorf("failed to detect current desktop: %w", err)
 		}
@@ -498,7 +498,7 @@ func HasUnsavedChanges(workspaceName string) bool {
 // SetSlotInfo records a terminal slot with its window ID and session name.
 func SetSlotInfo(windowID uint32, slotIndex int, sessionName string, desktop int) error {
 	if desktop == -1 {
-		d, err := x11.GetCurrentDesktopStandalone()
+		d, err := platform.GetCurrentDesktopStandalone()
 		if err != nil {
 			return fmt.Errorf("failed to detect current desktop: %w", err)
 		}

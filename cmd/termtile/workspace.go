@@ -11,10 +11,11 @@ import (
 	"github.com/1broseidon/termtile/internal/agent"
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/ipc"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
 	"github.com/1broseidon/termtile/internal/workspace"
-	"github.com/1broseidon/termtile/internal/x11"
 	"github.com/BurntSushi/xgb/xproto"
+	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/ewmh"
 	"github.com/BurntSushi/xgbutil/icccm"
 )
@@ -26,18 +27,25 @@ func logWorkspaceAction(action agent.ActionType, wsName string, slot int, detail
 	}
 }
 
-type x11TerminalLister struct {
-	conn     *x11.Connection
-	detector *terminals.Detector
+// x11Accessor is an optional interface for backends that expose X11 internals.
+type x11Accessor interface {
+	XUtil() *xgbutil.XUtil
+	RootWindow() xproto.Window
 }
 
-func (l *x11TerminalLister) ListTerminals() ([]workspace.TerminalWindow, error) {
-	monitor, err := l.conn.GetActiveMonitor()
+type platformTerminalLister struct {
+	backend  platform.Backend
+	detector *terminals.Detector
+	xu       *xgbutil.XUtil // optional, for PID/title lookups
+}
+
+func (l *platformTerminalLister) ListTerminals() ([]workspace.TerminalWindow, error) {
+	display, err := l.backend.ActiveDisplay()
 	if err != nil {
 		return nil, err
 	}
 
-	terms, err := l.detector.FindTerminals(l.conn, monitor)
+	terms, err := l.detector.FindTerminals(l.backend, display.ID, display.Bounds)
 	if err != nil {
 		return nil, err
 	}
@@ -45,8 +53,10 @@ func (l *x11TerminalLister) ListTerminals() ([]workspace.TerminalWindow, error) 
 	out := make([]workspace.TerminalWindow, 0, len(terms))
 	for _, t := range terms {
 		pid := 0
-		if p, err := ewmh.WmPidGet(l.conn.XUtil, t.WindowID); err == nil {
-			pid = int(p)
+		if l.xu != nil {
+			if p, err := ewmh.WmPidGet(l.xu, xproto.Window(t.WindowID)); err == nil {
+				pid = int(p)
+			}
 		}
 		out = append(out, workspace.TerminalWindow{
 			WindowID: uint32(t.WindowID),
@@ -60,18 +70,18 @@ func (l *x11TerminalLister) ListTerminals() ([]workspace.TerminalWindow, error) 
 	return out, nil
 }
 
-func (l *x11TerminalLister) ActiveWindowID() (uint32, error) {
-	win, err := l.conn.GetActiveWindow()
+func (l *platformTerminalLister) ActiveWindowID() (uint32, error) {
+	win, err := l.backend.ActiveWindow()
 	return uint32(win), err
 }
 
-func (l *x11TerminalLister) WindowTitle(windowID uint32) (string, error) {
-	if l == nil || l.conn == nil {
-		return "", fmt.Errorf("x11 terminal lister is nil")
+func (l *platformTerminalLister) WindowTitle(windowID uint32) (string, error) {
+	if l.xu == nil {
+		return "", fmt.Errorf("no X11 connection for title lookup")
 	}
 	win := xproto.Window(windowID)
 
-	title, err := ewmh.WmNameGet(l.conn.XUtil, win)
+	title, err := ewmh.WmNameGet(l.xu, win)
 	if err == nil {
 		title = strings.TrimSpace(title)
 		if title != "" {
@@ -79,7 +89,7 @@ func (l *x11TerminalLister) WindowTitle(windowID uint32) (string, error) {
 		}
 	}
 
-	title, err2 := icccm.WmNameGet(l.conn.XUtil, win)
+	title, err2 := icccm.WmNameGet(l.xu, win)
 	if err2 == nil {
 		title = strings.TrimSpace(title)
 		if title != "" {
@@ -93,47 +103,12 @@ func (l *x11TerminalLister) WindowTitle(windowID uint32) (string, error) {
 	return "", err2
 }
 
-type x11WindowMinimizer struct {
-	conn            *x11.Connection
-	changeStateAtom xproto.Atom
+type platformWindowMinimizer struct {
+	backend platform.Backend
 }
 
-func newX11WindowMinimizer(conn *x11.Connection) (*x11WindowMinimizer, error) {
-	if conn == nil {
-		return nil, fmt.Errorf("x11 connection is nil")
-	}
-
-	reply, err := xproto.InternAtom(conn.XUtil.Conn(), false, uint16(len("WM_CHANGE_STATE")), "WM_CHANGE_STATE").Reply()
-	if err != nil {
-		return nil, err
-	}
-
-	return &x11WindowMinimizer{
-		conn:            conn,
-		changeStateAtom: reply.Atom,
-	}, nil
-}
-
-func (m *x11WindowMinimizer) MinimizeWindow(windowID uint32) error {
-	const iconicState = 3
-
-	ev := xproto.ClientMessageEvent{
-		Format: 32,
-		Window: xproto.Window(windowID),
-		Type:   m.changeStateAtom,
-		Data:   xproto.ClientMessageDataUnionData32New([]uint32{iconicState, 0, 0, 0, 0}),
-	}
-
-	if err := xproto.SendEvent(
-		m.conn.XUtil.Conn(),
-		false,
-		m.conn.Root,
-		xproto.EventMaskSubstructureRedirect|xproto.EventMaskSubstructureNotify,
-		string(ev.Bytes()),
-	).Check(); err != nil {
-		return err
-	}
-	return nil
+func (m *platformWindowMinimizer) MinimizeWindow(windowID uint32) error {
+	return m.backend.Minimize(platform.WindowID(windowID))
 }
 
 type ipcLayoutApplier struct {
@@ -146,6 +121,19 @@ func (a *ipcLayoutApplier) ApplyLayout(layoutName string, tileNow bool) error {
 
 func (a *ipcLayoutApplier) ApplyLayoutWithOrder(layoutName string, windowOrder []uint32) error {
 	return a.client.ApplyLayoutWithOrder(layoutName, windowOrder)
+}
+
+// newTerminalLister creates a terminal lister from a platform backend.
+func newTerminalLister(backend platform.Backend, cfg *config.Config) *platformTerminalLister {
+	var xu *xgbutil.XUtil
+	if accessor, ok := backend.(x11Accessor); ok {
+		xu = accessor.XUtil()
+	}
+	return &platformTerminalLister{
+		backend:  backend,
+		detector: terminals.NewDetector(cfg.TerminalClassNames()),
+		xu:       xu,
+	}
 }
 
 func runWorkspace(args []string) int {
@@ -289,18 +277,15 @@ func runWorkspace(args []string) int {
 			}
 		}
 
-		// Connect to X11
-		conn, err := x11.NewConnection()
+		// Connect to display
+		backend, err := platform.NewLinuxBackendFromDisplay()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		defer conn.Close()
+		defer backend.Disconnect()
 
-		lister := &x11TerminalLister{
-			conn:     conn,
-			detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-		}
+		lister := newTerminalLister(backend, res.Config)
 
 		applier := &ipcLayoutApplier{client: ipc.NewClient()}
 		if err := applier.client.Ping(); err != nil {
@@ -308,11 +293,7 @@ func runWorkspace(args []string) int {
 			return 1
 		}
 
-		minimizer, err := newX11WindowMinimizer(conn)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
+		minimizer := &platformWindowMinimizer{backend: backend}
 
 		// Get current layout for auto-save
 		autoSaveLayout := res.Config.DefaultLayout
@@ -410,17 +391,14 @@ func runWorkspace(args []string) int {
 			layout = status.ActiveLayout
 		}
 
-		conn, err := x11.NewConnection()
+		backend, err := platform.NewLinuxBackendFromDisplay()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		defer conn.Close()
+		defer backend.Disconnect()
 
-		lister := &x11TerminalLister{
-			conn:     conn,
-			detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-		}
+		lister := newTerminalLister(backend, res.Config)
 
 		ws, err := workspace.Save(name, layout, res.Config.TerminalSort, *includeCmd, lister)
 		if err != nil {
@@ -484,17 +462,14 @@ func runWorkspace(args []string) int {
 			}
 		}
 
-		conn, err := x11.NewConnection()
+		backend, err := platform.NewLinuxBackendFromDisplay()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		defer conn.Close()
+		defer backend.Disconnect()
 
-		lister := &x11TerminalLister{
-			conn:     conn,
-			detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-		}
+		lister := newTerminalLister(backend, res.Config)
 
 		applier := &ipcLayoutApplier{client: ipc.NewClient()}
 		if err := applier.client.Ping(); err != nil {
@@ -504,12 +479,7 @@ func runWorkspace(args []string) int {
 
 		var minimizer workspace.WindowMinimizer
 		if !*noReplace {
-			m, err := newX11WindowMinimizer(conn)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 1
-			}
-			minimizer = m
+			minimizer = &platformWindowMinimizer{backend: backend}
 		}
 
 		autoSaveLayout := ""
@@ -578,17 +548,14 @@ func runWorkspace(args []string) int {
 			return 1
 		}
 
-		conn, err := x11.NewConnection()
+		backend, err := platform.NewLinuxBackendFromDisplay()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		defer conn.Close()
+		defer backend.Disconnect()
 
-		lister := &x11TerminalLister{
-			conn:     conn,
-			detector: terminals.NewDetector(res.Config.TerminalClassNames()),
-		}
+		lister := newTerminalLister(backend, res.Config)
 
 		// Close all terminal windows
 		if err := workspace.CloseTerminals(lister); err != nil {
@@ -618,36 +585,9 @@ func runWorkspace(args []string) int {
 }
 
 
-// closeWindow sends a WM_DELETE_WINDOW message to close a window gracefully.
-func closeWindow(conn *x11.Connection, windowID uint32) error {
-	// Get WM_DELETE_WINDOW atom
-	deleteAtomReply, err := xproto.InternAtom(conn.XUtil.Conn(), false, uint16(len("WM_DELETE_WINDOW")), "WM_DELETE_WINDOW").Reply()
-	if err != nil {
-		return err
-	}
-
-	// Get WM_PROTOCOLS atom
-	protocolsAtomReply, err := xproto.InternAtom(conn.XUtil.Conn(), false, uint16(len("WM_PROTOCOLS")), "WM_PROTOCOLS").Reply()
-	if err != nil {
-		return err
-	}
-
-	// Send WM_DELETE_WINDOW client message
-	ev := xproto.ClientMessageEvent{
-		Format: 32,
-		Window: xproto.Window(windowID),
-		Type:   protocolsAtomReply.Atom,
-		Data:   xproto.ClientMessageDataUnionData32New([]uint32{uint32(deleteAtomReply.Atom), 0, 0, 0, 0}),
-	}
-
-	// Use SendEventChecked for proper error handling
-	return xproto.SendEventChecked(
-		conn.XUtil.Conn(),
-		false,
-		xproto.Window(windowID),
-		xproto.EventMaskNoEvent,
-		string(ev.Bytes()),
-	).Check()
+// closeWindowViaBackend closes a window using the platform backend.
+func closeWindowViaBackend(backend platform.Backend, windowID uint32) error {
+	return backend.Close(platform.WindowID(windowID))
 }
 
 // spawnTerminalWithCommand spawns a terminal with an optional command override.
@@ -823,7 +763,7 @@ func shellQuote(s string) string {
 }
 
 // waitForNewTerminal waits for a single new terminal to appear.
-func waitForNewTerminal(lister *x11TerminalLister, existing map[uint32]struct{}, timeout time.Duration) ([]uint32, error) {
+func waitForNewTerminal(lister *platformTerminalLister, existing map[uint32]struct{}, timeout time.Duration) ([]uint32, error) {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()

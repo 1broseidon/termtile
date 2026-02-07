@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/1broseidon/termtile/internal/agent"
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/ipc"
+	workspacepkg "github.com/1broseidon/termtile/internal/workspace"
 )
 
 const (
@@ -56,6 +58,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		tracked:     make(map[string]map[int]trackedAgent),
 		nextSlot:    make(map[string]int),
 	}
+	s.reconcile()
 
 	s.mcpServer = mcpsdk.NewServer(
 		&mcpsdk.Implementation{
@@ -106,12 +109,68 @@ func (s *Server) registerTools() {
 	}, s.handleKillAgent)
 }
 
-// resolveWorkspace returns the workspace name, defaulting to DefaultWorkspace.
-func resolveWorkspace(ws string) string {
-	if ws == "" {
-		return DefaultWorkspace
+// reconcile rebuilds startup tracking state from existing termtile tmux sessions.
+func (s *Server) reconcile() {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return
 	}
-	return ws
+	s.reconcileSessionNames(strings.Split(strings.TrimSpace(string(out)), "\n"))
+}
+
+// reconcileSessionNames applies reconcile logic over a provided session list.
+func (s *Server) reconcileSessionNames(sessionNames []string) {
+	maxSlots := make(map[string]int)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, sessionName := range sessionNames {
+		sessionName = strings.TrimSpace(sessionName)
+		if !strings.HasPrefix(sessionName, "termtile-") {
+			continue
+		}
+
+		trimmed := strings.TrimPrefix(sessionName, "termtile-")
+		lastDash := strings.LastIndex(trimmed, "-")
+		if lastDash <= 0 || lastDash == len(trimmed)-1 {
+			continue
+		}
+
+		workspace := trimmed[:lastDash]
+		slot, err := strconv.Atoi(trimmed[lastDash+1:])
+		if err != nil || slot < 0 {
+			continue
+		}
+		isInRegistry := workspacepkg.HasSessionInRegistry(sessionName)
+
+		if max, ok := maxSlots[workspace]; !ok || slot > max {
+			maxSlots[workspace] = slot
+		}
+
+		// Registry-backed sessions are managed by workspace state and are not
+		// orphan MCP sessions to recover into the in-memory tracked map.
+		if isInRegistry {
+			continue
+		}
+
+		if s.tracked[workspace] == nil {
+			s.tracked[workspace] = make(map[int]trackedAgent)
+		}
+		s.tracked[workspace][slot] = trackedAgent{
+			agentType:  "unknown",
+			tmuxTarget: agent.TargetForSession(sessionName),
+			spawnMode:  "window",
+		}
+
+	}
+
+	for workspace, max := range maxSlots {
+		next := max + 1
+		if next > s.nextSlot[workspace] {
+			s.nextSlot[workspace] = next
+		}
+	}
 }
 
 // resolveSpawnMode determines the spawn mode from the request and agent config.
@@ -203,6 +262,23 @@ func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode, taskM
 	return slot
 }
 
+// updateTmuxTarget updates the tmux target for a tracked slot.
+func (s *Server) updateTmuxTarget(workspace string, slot int, tmuxTarget string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return
+	}
+	ta.tmuxTarget = tmuxTarget
+	ws[slot] = ta
+}
+
 // removeTracked removes a slot from the tracking map.
 func (s *Server) removeTracked(workspace string, slot int) {
 	s.mu.Lock()
@@ -280,13 +356,39 @@ func shellQuote(s string) string {
 //     agents (e.g., Claude Code) render status bars below the input prompt.
 //  2. Process-based fallback: if the pane's current command is a shell,
 //     check whether it has any child processes.
-func (s *Server) checkIdle(target, agentType string) bool {
+func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
+	out, err := tmuxCapturePane(target, 30)
+	if err != nil {
+		return false
+	}
+
+	// Tier 0: response fence detection. When a task was sent with
+	// response_fence enabled, the closing [/termtile-response] tag is
+	// the most reliable "done" signal — it only appears when the agent
+	// has finished and wrapped its final answer.
+	//
+	// However, the fence instruction text itself contains the literal
+	// tags ("...inside [termtile-response] and [/termtile-response] tags...").
+	// We must only match the close tag if it appears AFTER the marker
+	// delimiter, which separates the instruction/task from the response.
+	marker, hasFence := s.getOutputConfig(workspace, slot)
+	if hasFence {
+		if marker != "" {
+			markerIdx := strings.LastIndex(out, marker)
+			if markerIdx >= 0 && strings.Contains(out[markerIdx:], fenceClose) {
+				return true
+			}
+		} else if strings.Contains(out, fenceClose) {
+			return true
+		}
+		// Fence expected but not found — the agent is still working.
+		// Do NOT fall through to Tier 1/2 which can false-positive on
+		// startup tips, rate limit prompts, etc. that match the idle pattern.
+		return false
+	}
+
 	// Tier 1: content-based detection via IdlePattern.
 	if agentCfg, ok := s.config.Agents[agentType]; ok && agentCfg.IdlePattern != "" {
-		out, err := tmuxCapturePane(target, 20)
-		if err != nil {
-			return false
-		}
 		return containsIdlePattern(out, agentCfg.IdlePattern)
 	}
 
@@ -322,8 +424,10 @@ func lastNonEmptyLine(text string) string {
 }
 
 // containsIdlePattern scans the last few non-empty lines of text for the
-// idle pattern. TUI agents often render status bars or chrome below the
-// input prompt, so we check up to 5 non-empty lines from the bottom.
+// idle pattern. The pattern must appear at the START of a short line
+// (under 40 chars) to avoid false positives from hint/help text that
+// contains the same character (e.g. codex shows "› Use /skills..." while
+// actively working, but the actual idle prompt is just "›" on its own).
 func containsIdlePattern(text, pattern string) bool {
 	lines := strings.Split(text, "\n")
 	checked := 0
@@ -332,7 +436,10 @@ func containsIdlePattern(text, pattern string) bool {
 		if trimmed == "" {
 			continue
 		}
-		if strings.Contains(trimmed, pattern) {
+		// The idle prompt is typically just the pattern character (possibly
+		// followed by a short user-typed prefix). Hint lines are long
+		// sentences that happen to start with the same character.
+		if strings.HasPrefix(trimmed, pattern) && len(trimmed) < 40 {
 			return true
 		}
 		checked++
@@ -354,6 +461,24 @@ func (s *Server) getOutputConfig(workspace string, slot int) (taskMarker string,
 		return "", false
 	}
 	return ta.taskMarker, ta.responseFence
+}
+
+// updateOutputConfig updates the output parsing config for a tracked slot.
+func (s *Server) updateOutputConfig(workspace string, slot int, taskMarker string, responseFence bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return
+	}
+	ta.taskMarker = taskMarker
+	ta.responseFence = responseFence
+	ws[slot] = ta
 }
 
 // getAgentType returns the agent type for a tracked slot.

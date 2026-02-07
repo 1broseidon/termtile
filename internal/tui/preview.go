@@ -6,7 +6,6 @@ import (
 
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/tiling"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 func summarizeLayout(layout *config.Layout, tileCount, gapSize int) string {
@@ -20,7 +19,7 @@ func summarizeLayout(layout *config.Layout, tileCount, gapSize int) string {
 		gapSize = 0
 	}
 
-	monitor := x11.Monitor{
+	monitor := tiling.Rect{
 		X:      0,
 		Y:      0,
 		Width:  1920,
@@ -77,7 +76,7 @@ func renderASCIIPreview(layout *config.Layout, tileCount, width, height int) []s
 	// Use the tiling math to calculate positions
 	// We simulate a monitor that maps to our character canvas
 	// Each character represents a "pixel" in the preview
-	monitor := x11.Monitor{
+	monitor := tiling.Rect{
 		X:      0,
 		Y:      0,
 		Width:  width * 2,  // Scale up for better resolution

@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/1broseidon/termtile/internal/tiling"
-	"github.com/1broseidon/termtile/internal/x11"
 	"github.com/BurntSushi/xgb/xproto"
+	"github.com/BurntSushi/xgbutil"
 )
 
 // Border colors
@@ -31,16 +31,18 @@ type BorderOverlay struct {
 
 // OverlayManager manages overlay windows for move mode
 type OverlayManager struct {
-	conn *x11.Connection
+	xu   *xgbutil.XUtil
+	root xproto.Window
 
 	terminalBorders []*BorderOverlay // Borders around terminal windows (decorated rects)
 	slotBorders     []*BorderOverlay // Borders around every grid slot (preview)
 }
 
 // NewOverlayManager creates a new overlay manager
-func NewOverlayManager(conn *x11.Connection) *OverlayManager {
+func NewOverlayManager(xu *xgbutil.XUtil, root xproto.Window) *OverlayManager {
 	return &OverlayManager{
-		conn:            conn,
+		xu:              xu,
+		root:            root,
 		terminalBorders: nil,
 		slotBorders:     nil,
 	}
@@ -145,10 +147,10 @@ func (m *OverlayManager) showBorder(border *BorderOverlay, rect tiling.Rect, col
 	m.updateWindow(border.Right, x+w-t, y+t, t, h-2*t, color)
 
 	// Map all windows
-	xproto.MapWindow(m.conn.XUtil.Conn(), border.Top)
-	xproto.MapWindow(m.conn.XUtil.Conn(), border.Bottom)
-	xproto.MapWindow(m.conn.XUtil.Conn(), border.Left)
-	xproto.MapWindow(m.conn.XUtil.Conn(), border.Right)
+	xproto.MapWindow(m.xu.Conn(), border.Top)
+	xproto.MapWindow(m.xu.Conn(), border.Bottom)
+	xproto.MapWindow(m.xu.Conn(), border.Left)
+	xproto.MapWindow(m.xu.Conn(), border.Right)
 
 	border.mapped = true
 	return nil
@@ -160,10 +162,10 @@ func (m *OverlayManager) hideBorder(border *BorderOverlay) {
 		return
 	}
 
-	xproto.UnmapWindow(m.conn.XUtil.Conn(), border.Top)
-	xproto.UnmapWindow(m.conn.XUtil.Conn(), border.Bottom)
-	xproto.UnmapWindow(m.conn.XUtil.Conn(), border.Left)
-	xproto.UnmapWindow(m.conn.XUtil.Conn(), border.Right)
+	xproto.UnmapWindow(m.xu.Conn(), border.Top)
+	xproto.UnmapWindow(m.xu.Conn(), border.Bottom)
+	xproto.UnmapWindow(m.xu.Conn(), border.Left)
+	xproto.UnmapWindow(m.xu.Conn(), border.Right)
 
 	border.mapped = false
 }
@@ -171,16 +173,16 @@ func (m *OverlayManager) hideBorder(border *BorderOverlay) {
 // destroyBorder destroys the border windows
 func (m *OverlayManager) destroyBorder(border *BorderOverlay) {
 	if border.Top != 0 {
-		xproto.DestroyWindow(m.conn.XUtil.Conn(), border.Top)
+		xproto.DestroyWindow(m.xu.Conn(), border.Top)
 	}
 	if border.Bottom != 0 {
-		xproto.DestroyWindow(m.conn.XUtil.Conn(), border.Bottom)
+		xproto.DestroyWindow(m.xu.Conn(), border.Bottom)
 	}
 	if border.Left != 0 {
-		xproto.DestroyWindow(m.conn.XUtil.Conn(), border.Left)
+		xproto.DestroyWindow(m.xu.Conn(), border.Left)
 	}
 	if border.Right != 0 {
-		xproto.DestroyWindow(m.conn.XUtil.Conn(), border.Right)
+		xproto.DestroyWindow(m.xu.Conn(), border.Right)
 	}
 
 	border.Top = 0
@@ -221,8 +223,8 @@ func (m *OverlayManager) createBorderWindows(border *BorderOverlay) error {
 
 // createOverrideRedirectWindow creates a single override-redirect window
 func (m *OverlayManager) createOverrideRedirectWindow() (xproto.Window, error) {
-	conn := m.conn.XUtil.Conn()
-	screen := m.conn.XUtil.Screen()
+	conn := m.xu.Conn()
+	screen := m.xu.Screen()
 
 	wid, err := xproto.NewWindowId(conn)
 	if err != nil {
@@ -235,7 +237,7 @@ func (m *OverlayManager) createOverrideRedirectWindow() (xproto.Window, error) {
 		conn,
 		screen.RootDepth,
 		wid,
-		m.conn.Root,
+		m.root,
 		0, 0, // x, y (will be updated later)
 		1, 1, // width, height (will be updated later)
 		0, // border_width
@@ -256,7 +258,7 @@ func (m *OverlayManager) createOverrideRedirectWindow() (xproto.Window, error) {
 
 // updateWindow moves, resizes, and recolors a window
 func (m *OverlayManager) updateWindow(wid xproto.Window, x, y, width, height int, color uint32) {
-	conn := m.conn.XUtil.Conn()
+	conn := m.xu.Conn()
 
 	// Ensure minimum dimensions
 	if width < 1 {

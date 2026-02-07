@@ -50,6 +50,9 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 	if raw.PaletteBackend != nil {
 		cfg.PaletteBackend = *raw.PaletteBackend
 	}
+	if raw.PaletteFuzzyMatching != nil {
+		cfg.PaletteFuzzyMatching = *raw.PaletteFuzzyMatching
+	}
 	if raw.PreferredTerminal != nil {
 		cfg.PreferredTerminal = *raw.PreferredTerminal
 	}
@@ -153,6 +156,7 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 			cfg.Agents[name] = agentCfg
 		}
 	}
+	applyAgentDefaults(cfg.Agents)
 
 	layoutBases, err := applyLayouts(cfg, raw)
 	if err != nil {
@@ -184,6 +188,15 @@ func applyLimitDefaults(limits *Limits) {
 	}
 	if limits.MaxTerminalsTotal == 0 {
 		limits.MaxTerminalsTotal = DefaultMaxTerminalsTotal
+	}
+}
+
+func applyAgentDefaults(agents map[string]AgentConfig) {
+	for name, agentCfg := range agents {
+		if strings.TrimSpace(agentCfg.ModelFlag) == "" {
+			agentCfg.ModelFlag = "--model"
+		}
+		agents[name] = agentCfg
 	}
 }
 

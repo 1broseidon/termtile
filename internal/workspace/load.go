@@ -243,12 +243,12 @@ func Load(cfg *WorkspaceConfig, spawnTemplates map[string]string, lister Termina
 		}
 	}
 
-	newWindowIDs, err := waitForNewTerminals(lister, existing, len(terms), opts.Timeout, debugf)
+	newWindowIDs, err := waitForNewTerminals(lister, existing, terms, opts.Timeout, debugf)
 	if err != nil {
 		return err
 	}
 	if debugf != nil {
-		debugf("Spawned terminals detected: %d window(s) order=%v", len(newWindowIDs), newWindowIDs)
+		debugf("Spawned terminals matched to slots: %d window(s) order=%v", len(newWindowIDs), newWindowIDs)
 	}
 
 	// Tile immediately with spawn order for instant visual feedback
@@ -381,18 +381,27 @@ func lookupSpawnTemplate(templates map[string]string, class string) (string, boo
 	return "", false
 }
 
-func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, want int, timeout time.Duration, debugf func(string, ...any)) ([]uint32, error) {
-	if want <= 0 {
+func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, terms []TerminalConfig, timeout time.Duration, debugf func(string, ...any)) ([]uint32, error) {
+	want := len(terms)
+	if want == 0 {
 		return nil, nil
 	}
+
+	pendingSlotsByClass := make(map[string][]int, want)
+	for i, term := range terms {
+		class := normalizedWMClass(term.WMClass)
+		pendingSlotsByClass[class] = append(pendingSlotsByClass[class], i)
+	}
+
+	windowIDsBySlot := make([]uint32, want)
+	assigned := 0
 	deadline := time.Now().Add(timeout)
 
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Track window IDs in the order they first appear
+	// Track discovered window IDs to avoid double-processing.
 	seen := make(map[uint32]struct{})
-	orderedIDs := make([]uint32, 0, want)
 
 	for {
 		windows, err := lister.ListTerminals()
@@ -405,22 +414,59 @@ func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, wa
 					continue // already tracked
 				}
 				seen[w.WindowID] = struct{}{}
-				orderedIDs = append(orderedIDs, w.WindowID)
 				if debugf != nil {
-					debugf("Detected new terminal window_id=%d wm_class=%q pid=%d pos=(%d,%d) (%d/%d)", w.WindowID, w.WMClass, w.PID, w.X, w.Y, len(orderedIDs), want)
+					debugf("Detected new terminal window_id=%d wm_class=%q pid=%d pos=(%d,%d)", w.WindowID, w.WMClass, w.PID, w.X, w.Y)
+				}
+
+				class := normalizedWMClass(w.WMClass)
+				slots := pendingSlotsByClass[class]
+				if len(slots) == 0 {
+					if debugf != nil {
+						debugf("  ignoring unmatched window_id=%d wm_class=%q (no pending slot)", w.WindowID, w.WMClass)
+					}
+					continue
+				}
+
+				slotIdx := slots[0]
+				pendingSlotsByClass[class] = slots[1:]
+				windowIDsBySlot[slotIdx] = w.WindowID
+				assigned++
+				if debugf != nil {
+					debugf("  matched window_id=%d wm_class=%q -> slot=%d (%d/%d)", w.WindowID, w.WMClass, terms[slotIdx].SlotIndex, assigned, want)
 				}
 			}
-			if len(orderedIDs) >= want {
-				return orderedIDs, nil
+			if assigned >= want {
+				return windowIDsBySlot, nil
 			}
 		}
 
 		if time.Now().After(deadline) {
-			return orderedIDs, fmt.Errorf("timeout waiting for spawned terminals (%d/%d seen after %s)", len(orderedIDs), want, timeout)
+			var missing []string
+			for class, slots := range pendingSlotsByClass {
+				if len(slots) == 0 {
+					continue
+				}
+				label := class
+				if label == "" {
+					label = "<empty>"
+				}
+				missing = append(missing, fmt.Sprintf("%s=%d", label, len(slots)))
+			}
+			sort.Strings(missing)
+
+			reason := fmt.Sprintf("timeout waiting for spawned terminals (%d/%d matched after %s)", assigned, want, timeout)
+			if len(missing) > 0 {
+				reason = fmt.Sprintf("%s; missing classes: %s", reason, strings.Join(missing, ", "))
+			}
+			return windowIDsBySlot[:assigned], fmt.Errorf("%s", reason)
 		}
 
 		<-ticker.C
 	}
+}
+
+func normalizedWMClass(class string) string {
+	return strings.ToLower(strings.TrimSpace(class))
 }
 
 func matchWindowsByTitle(workspaceName string, terms []TerminalConfig, windowIDs []uint32, titleForWindow func(uint32) (string, error), timeout time.Duration, debugf func(string, ...any)) ([]uint32, string, bool) {

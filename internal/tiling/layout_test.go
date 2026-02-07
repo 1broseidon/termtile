@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/1broseidon/termtile/internal/config"
-	"github.com/1broseidon/termtile/internal/x11"
 )
 
 func TestCalculatePositionsWithLayout_MaxTerminalWidthDoesNotCompressGrid(t *testing.T) {
@@ -18,7 +17,7 @@ func TestCalculatePositionsWithLayout_MaxTerminalWidthDoesNotCompressGrid(t *tes
 		// Smaller than available slot width.
 		MaxTerminalWidth: 50,
 	}
-	monitor := x11.Monitor{X: 0, Y: 0, Width: 210, Height: 100}
+	monitor := Rect{X: 0, Y: 0, Width: 210, Height: 100}
 
 	positions, err := CalculatePositionsWithLayout(2, monitor, layout, 10)
 	if err != nil {
@@ -52,7 +51,7 @@ func TestCalculatePositionsWithLayout_ErrorsWhenInsufficientSpace(t *testing.T) 
 		},
 		TileRegion: config.TileRegion{Type: config.RegionFull},
 	}
-	monitor := x11.Monitor{X: 0, Y: 0, Width: 20, Height: 10}
+	monitor := Rect{X: 0, Y: 0, Width: 20, Height: 10}
 
 	_, err := CalculatePositionsWithLayout(2, monitor, layout, 20)
 	if err == nil {
@@ -61,7 +60,7 @@ func TestCalculatePositionsWithLayout_ErrorsWhenInsufficientSpace(t *testing.T) 
 }
 
 func TestApplyRegion_CustomClampsToMinimumSize(t *testing.T) {
-	monitor := x11.Monitor{X: 0, Y: 0, Width: 10, Height: 10}
+	monitor := Rect{X: 0, Y: 0, Width: 10, Height: 10}
 	region := config.TileRegion{
 		Type:          config.RegionCustom,
 		XPercent:      0,

@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/1broseidon/termtile/internal/config"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
 	"github.com/1broseidon/termtile/internal/tiling"
-	"github.com/1broseidon/termtile/internal/x11"
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/keybind"
@@ -23,6 +23,12 @@ const DefaultTimeout = 10
 // LayoutProvider supplies the currently active layout name.
 type LayoutProvider interface {
 	GetActiveLayoutName() string
+}
+
+// x11Accessor is an optional interface for backends that expose X11 internals.
+type x11Accessor interface {
+	XUtil() *xgbutil.XUtil
+	RootWindow() xproto.Window
 }
 
 // MoveResult contains information about a completed move operation.
@@ -42,7 +48,9 @@ type OnMoveCompleteFunc func(result MoveResult)
 // Mode is the main move mode controller
 type Mode struct {
 	mu              sync.Mutex
-	conn            *x11.Connection
+	backend         platform.Backend
+	xu              *xgbutil.XUtil
+	root            xproto.Window
 	detector        *terminals.Detector
 	config          *config.Config
 	layoutProvider  LayoutProvider
@@ -59,19 +67,29 @@ type Mode struct {
 }
 
 // NewMode creates a new move mode controller
-func NewMode(conn *x11.Connection, detector *terminals.Detector, cfg *config.Config, layoutProvider LayoutProvider) *Mode {
+func NewMode(backend platform.Backend, detector *terminals.Detector, cfg *config.Config, layoutProvider LayoutProvider) *Mode {
 	timeout := DefaultTimeout
 	if cfg.MoveModeTimeout > 0 {
 		timeout = cfg.MoveModeTimeout
 	}
 
+	// Extract X11 internals via type assertion
+	var xu *xgbutil.XUtil
+	var root xproto.Window
+	if accessor, ok := backend.(x11Accessor); ok {
+		xu = accessor.XUtil()
+		root = accessor.RootWindow()
+	}
+
 	return &Mode{
-		conn:            conn,
+		backend:         backend,
+		xu:              xu,
+		root:            root,
 		detector:        detector,
 		config:          cfg,
 		layoutProvider:  layoutProvider,
 		state:           NewState(),
-		overlay:         NewOverlayManager(conn),
+		overlay:         NewOverlayManager(xu, root),
 		timeoutDuration: time.Duration(timeout) * time.Second,
 	}
 }
@@ -96,7 +114,7 @@ func (m *Mode) Enter() error {
 	log.Println("Entering move mode")
 
 	// Get current monitor
-	monitor, err := m.conn.GetActiveMonitor()
+	display, err := m.backend.ActiveDisplay()
 	if err != nil {
 		log.Printf("Move mode: failed to get active monitor: %v", err)
 		return err
@@ -117,20 +135,20 @@ func (m *Mode) Enter() error {
 
 	// Apply screen padding (match tiler behavior).
 	padding := m.config.ScreenPadding
-	adjMonitor := *monitor
-	adjMonitor.X += padding.Left
-	adjMonitor.Y += padding.Top
-	adjMonitor.Width -= (padding.Left + padding.Right)
-	adjMonitor.Height -= (padding.Top + padding.Bottom)
-	if adjMonitor.Width < 1 || adjMonitor.Height < 1 {
+	bounds := display.Bounds
+	bounds.X += padding.Left
+	bounds.Y += padding.Top
+	bounds.Width -= (padding.Left + padding.Right)
+	bounds.Height -= (padding.Top + padding.Bottom)
+	if bounds.Width < 1 || bounds.Height < 1 {
 		return fmt.Errorf(
 			"screen_padding leaves no usable space: %dx%d at %d,%d",
-			adjMonitor.Width, adjMonitor.Height, adjMonitor.X, adjMonitor.Y,
+			bounds.Width, bounds.Height, bounds.X, bounds.Y,
 		)
 	}
 
 	// Find terminals on the current monitor (after padding).
-	terminalWindows, err := m.detector.FindTerminals(m.conn, &adjMonitor)
+	terminalWindows, err := m.detector.FindTerminals(m.backend, display.ID, bounds)
 	if err != nil {
 		log.Printf("Move mode: failed to find terminals: %v", err)
 		return err
@@ -141,10 +159,11 @@ func (m *Mode) Enter() error {
 		return nil
 	}
 
-	sortTerminals(m.conn, terminalWindows, m.config.TerminalSort)
+	sortTerminals(m.backend, terminalWindows, m.config.TerminalSort)
 
 	// Apply tile region
-	adjMonitor = tiling.ApplyRegion(adjMonitor, layout.TileRegion)
+	monitorRect := tiling.Rect{X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height}
+	adjMonitor := tiling.ApplyRegion(monitorRect, layout.TileRegion)
 
 	// Calculate grid dimensions
 	rows, cols := m.calculateGridDimensions(len(terminalWindows), layout)
@@ -161,9 +180,6 @@ func (m *Mode) Enter() error {
 	}
 
 	// Calculate slot positions using actual terminal count.
-	// This ensures flexible_last_row correctly expands the last row windows.
-	// With flexible_last_row enabled, the grid has exactly len(terminalWindows) slots,
-	// not rows*cols, because the last row's windows expand to fill available width.
 	positions, err := tiling.CalculatePositionsWithLayout(
 		len(terminalWindows),
 		adjMonitor,
@@ -206,7 +222,7 @@ func (m *Mode) Enter() error {
 	m.state.TargetSlotIndex = 0
 
 	// Find the active window and select it if it's a terminal
-	activeWin, _ := m.conn.GetActiveWindow()
+	activeWin, _ := m.backend.ActiveWindow()
 	for i, ts := range termSlots {
 		if ts.Window.WindowID == activeWin {
 			m.state.SelectedIndex = i
@@ -341,10 +357,9 @@ func (m *Mode) executeMove() {
 		m.state.GrabbedWindow, m.state.TargetSlotIndex,
 		adjustedTarget.X, adjustedTarget.Y, adjustedTarget.Width, adjustedTarget.Height)
 
-	err := m.conn.MoveResizeWindow(
+	err := m.backend.MoveResize(
 		m.state.GrabbedWindow,
-		adjustedTarget.X, adjustedTarget.Y,
-		adjustedTarget.Width, adjustedTarget.Height,
+		platform.Rect{X: adjustedTarget.X, Y: adjustedTarget.Y, Width: adjustedTarget.Width, Height: adjustedTarget.Height},
 	)
 	if err != nil {
 		log.Printf("Move mode: failed to move window: %v", err)
@@ -365,10 +380,9 @@ func (m *Mode) executeMove() {
 			otherTerm.Window.WindowID, grabbedTerm.SlotIdx,
 			adjustedSource.X, adjustedSource.Y, adjustedSource.Width, adjustedSource.Height)
 
-		err := m.conn.MoveResizeWindow(
+		err := m.backend.MoveResize(
 			otherTerm.Window.WindowID,
-			adjustedSource.X, adjustedSource.Y,
-			adjustedSource.Width, adjustedSource.Height,
+			platform.Rect{X: adjustedSource.X, Y: adjustedSource.Y, Width: adjustedSource.Width, Height: adjustedSource.Height},
 		)
 		if err != nil {
 			log.Printf("Move mode: failed to swap window: %v", err)
@@ -438,9 +452,6 @@ func (m *Mode) updateOverlays() {
 
 		targetSlot := m.state.TargetSlotRect()
 		if targetSlot != nil {
-			// Always show the raw slot grid. Per-terminal margins are a tiling
-			// fine-tuning knob and can make previews noisy (especially with negative
-			// margins); move mode should present the base grid.
 			slotRects = []tiling.Rect{*targetSlot}
 			slotColors = []uint32{uint32(ColorSelection)}
 		}
@@ -451,7 +462,7 @@ func (m *Mode) updateOverlays() {
 	}
 }
 
-func (m *Mode) getVisibleWindowRect(windowID xproto.Window) (tiling.Rect, bool) {
+func (m *Mode) getVisibleWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
 	outer, ok := m.getOutermostWindowRect(windowID)
 	if ok {
 		return outer, true
@@ -462,18 +473,19 @@ func (m *Mode) getVisibleWindowRect(windowID xproto.Window) (tiling.Rect, bool) 
 	return client, ok
 }
 
-func (m *Mode) getClientWindowRect(windowID xproto.Window) (tiling.Rect, bool) {
-	conn := m.conn.XUtil.Conn()
+func (m *Mode) getClientWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
+	conn := m.xu.Conn()
+	xpWin := xproto.Window(windowID)
 
-	geom, err := xproto.GetGeometry(conn, xproto.Drawable(windowID)).Reply()
+	geom, err := xproto.GetGeometry(conn, xproto.Drawable(xpWin)).Reply()
 	if err != nil {
 		return tiling.Rect{}, false
 	}
 
 	translate, err := xproto.TranslateCoordinates(
 		conn,
-		windowID,
-		m.conn.Root,
+		xpWin,
+		m.root,
 		0, 0,
 	).Reply()
 	if err != nil {
@@ -488,17 +500,18 @@ func (m *Mode) getClientWindowRect(windowID xproto.Window) (tiling.Rect, bool) {
 	}, true
 }
 
-func (m *Mode) getOutermostWindowRect(windowID xproto.Window) (tiling.Rect, bool) {
-	conn := m.conn.XUtil.Conn()
+func (m *Mode) getOutermostWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
+	conn := m.xu.Conn()
+	xpWin := xproto.Window(windowID)
 
-	current := windowID
-	outer := windowID
+	current := xpWin
+	outer := xpWin
 	for depth := 0; depth < 16; depth++ {
 		tree, err := xproto.QueryTree(conn, current).Reply()
 		if err != nil {
 			break
 		}
-		if tree.Parent == 0 || tree.Parent == m.conn.Root {
+		if tree.Parent == 0 || tree.Parent == m.root {
 			break
 		}
 		outer = tree.Parent
@@ -512,7 +525,7 @@ func (m *Mode) getOutermostWindowRect(windowID xproto.Window) (tiling.Rect, bool
 	translate, err := xproto.TranslateCoordinates(
 		conn,
 		outer,
-		m.conn.Root,
+		m.root,
 		0, 0,
 	).Reply()
 	if err != nil {
@@ -560,7 +573,7 @@ func (m *Mode) calculateGridDimensions(termCount int, layout *config.Layout) (ro
 	}
 }
 
-func sortTerminals(conn *x11.Connection, windows []terminals.TerminalWindow, mode string) {
+func sortTerminals(backend platform.Backend, windows []terminals.TerminalWindow, mode string) {
 	switch mode {
 	case "client_list":
 		return
@@ -569,7 +582,7 @@ func sortTerminals(conn *x11.Connection, windows []terminals.TerminalWindow, mod
 			return windows[i].WindowID < windows[j].WindowID
 		})
 	case "active_first":
-		activeWin, _ := conn.GetActiveWindow()
+		activeWin, _ := backend.ActiveWindow()
 		sort.SliceStable(windows, func(i, j int) bool {
 			wi, wj := windows[i], windows[j]
 			if activeWin != 0 {
@@ -662,7 +675,7 @@ func assignTerminalsToSlots(windows []terminals.TerminalWindow, slots []tiling.R
 		}
 	}
 
-	// Fallback for any unassigned terminals (should only happen if slots < windows).
+	// Fallback for any unassigned terminals.
 	lastSlot := len(slots) - 1
 	if lastSlot < 0 {
 		lastSlot = 0
@@ -696,7 +709,7 @@ func (m *Mode) UpdateConfig(cfg *config.Config) {
 
 // grabKeyboard grabs the keyboard and sets up key event handling
 func (m *Mode) grabKeyboard() error {
-	xu := m.conn.XUtil
+	xu := m.xu
 	if err := m.ensureGrabWindow(); err != nil {
 		return err
 	}
@@ -706,7 +719,7 @@ func (m *Mode) grabKeyboard() error {
 		cookie := xproto.GrabKeyboard(
 			xu.Conn(),
 			false,                  // owner_events (report events to grab_window)
-			m.conn.Root,            // grab_window (must be viewable)
+			m.root,                 // grab_window (must be viewable)
 			xproto.TimeCurrentTime, // time
 			xproto.GrabModeAsync,   // pointer_mode
 			xproto.GrabModeAsync,   // keyboard_mode
@@ -720,8 +733,7 @@ func (m *Mode) grabKeyboard() error {
 	}
 
 	// When move mode is entered from a globally grabbed hotkey, the keyboard may
-	// already be grabbed by this client. If so, ungrab and retry to establish our
-	// own dedicated grab for the mode.
+	// already be grabbed by this client. If so, ungrab and retry.
 	if reply.Status == xproto.GrabStatusAlreadyGrabbed {
 		xproto.UngrabKeyboard(xu.Conn(), xproto.TimeCurrentTime)
 		reply, err = grab()
@@ -735,7 +747,6 @@ func (m *Mode) grabKeyboard() error {
 	}
 
 	// Redirect all key events to our grab window while move mode is active.
-	// This prevents root-bound global hotkeys from firing.
 	xevent.RedirectKeyEvents(xu, m.grabWindow)
 
 	// Connect key press handler on our dedicated window (safe to detach later).
@@ -750,7 +761,7 @@ func (m *Mode) grabKeyboard() error {
 
 // ungrabKeyboard releases the keyboard grab
 func (m *Mode) ungrabKeyboard() {
-	xu := m.conn.XUtil
+	xu := m.xu
 
 	// Ungrab the keyboard
 	xproto.UngrabKeyboard(xu.Conn(), xproto.TimeCurrentTime)
@@ -772,7 +783,7 @@ func (m *Mode) ensureGrabWindow() error {
 		return nil
 	}
 
-	conn := m.conn.XUtil.Conn()
+	conn := m.xu.Conn()
 
 	wid, err := xproto.NewWindowId(conn)
 	if err != nil {
@@ -785,7 +796,7 @@ func (m *Mode) ensureGrabWindow() error {
 		conn,
 		0, // depth (must be 0 for InputOnly)
 		wid,
-		m.conn.Root,
+		m.root,
 		0, 0, // x, y
 		1, 1, // width, height
 		0, // border_width
@@ -817,7 +828,6 @@ func (m *Mode) handleKeyPress(xu *xgbutil.XUtil, ev xevent.KeyPressEvent) {
 	}
 
 	// Map keysyms to actions
-	// Keysym values from X11/keysymdef.h
 	const (
 		XK_Up       = 0xff52
 		XK_Down     = 0xff54

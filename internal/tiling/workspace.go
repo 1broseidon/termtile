@@ -8,9 +8,8 @@ import (
 	"time"
 
 	"github.com/1broseidon/termtile/internal/config"
+	"github.com/1broseidon/termtile/internal/platform"
 	"github.com/1broseidon/termtile/internal/terminals"
-	"github.com/1broseidon/termtile/internal/x11"
-	"github.com/BurntSushi/xgb/xproto"
 )
 
 // Workspace tracks the tiling state for a monitor
@@ -18,26 +17,26 @@ type Workspace struct {
 	MonitorID          int
 	Terminals          []terminals.TerminalWindow
 	LastTiledAt        time.Time
-	PreviousGeometries map[xproto.Window]Rect
+	PreviousGeometries map[platform.WindowID]Rect
 }
 
 // Tiler manages the tiling state across monitors
 type Tiler struct {
 	mu              sync.RWMutex
-	conn            *x11.Connection
+	backend         platform.Backend
 	detector        *terminals.Detector
 	config          *config.Config
 	activeLayout    string
 	workspaces      map[int]*Workspace
 	previewID       int
 	previewTimer    *time.Timer
-	previewSnapshot map[xproto.Window]Rect
+	previewSnapshot map[platform.WindowID]Rect
 }
 
 // NewTiler creates a new tiler instance
-func NewTiler(conn *x11.Connection, detector *terminals.Detector, cfg *config.Config) *Tiler {
+func NewTiler(backend platform.Backend, detector *terminals.Detector, cfg *config.Config) *Tiler {
 	return &Tiler{
-		conn:         conn,
+		backend:      backend,
 		detector:     detector,
 		config:       cfg,
 		activeLayout: cfg.DefaultLayout,
@@ -68,14 +67,15 @@ func (t *Tiler) TileCurrentMonitor() error {
 	log.Printf("Using layout: %s (mode: %s, region: %s)", layoutName, layout.Mode, layout.TileRegion.Type)
 
 	// Step 2: Get the active monitor
-	monitor, err := t.conn.GetActiveMonitor()
+	display, err := t.backend.ActiveDisplay()
 	if err != nil {
 		log.Printf("Failed to get active monitor: %v", err)
 		return err
 	}
 
+	bounds := display.Bounds
 	log.Printf("Active monitor: %s (%dx%d at %d,%d)",
-		monitor.Name, monitor.Width, monitor.Height, monitor.X, monitor.Y)
+		display.Name, bounds.Width, bounds.Height, bounds.X, bounds.Y)
 
 	// Apply screen padding to create a safe area
 	padding := t.config.ScreenPadding
@@ -83,24 +83,25 @@ func (t *Tiler) TileCurrentMonitor() error {
 		log.Printf("Applying screen padding: top=%d, bottom=%d, left=%d, right=%d",
 			padding.Top, padding.Bottom, padding.Left, padding.Right)
 
-		monitor.X += padding.Left
-		monitor.Y += padding.Top
-		monitor.Width -= (padding.Left + padding.Right)
-		monitor.Height -= (padding.Top + padding.Bottom)
+		bounds.X += padding.Left
+		bounds.Y += padding.Top
+		bounds.Width -= (padding.Left + padding.Right)
+		bounds.Height -= (padding.Top + padding.Bottom)
 
-		if monitor.Width < 1 || monitor.Height < 1 {
+		if bounds.Width < 1 || bounds.Height < 1 {
 			return fmt.Errorf(
 				"screen_padding leaves no usable space: %dx%d at %d,%d",
-				monitor.Width, monitor.Height, monitor.X, monitor.Y,
+				bounds.Width, bounds.Height, bounds.X, bounds.Y,
 			)
 		}
 
 		log.Printf("Adjusted monitor area: %dx%d at %d,%d",
-			monitor.Width, monitor.Height, monitor.X, monitor.Y)
+			bounds.Width, bounds.Height, bounds.X, bounds.Y)
 	}
 
 	// Step 3: Apply tile region
-	adjustedMonitor := ApplyRegion(*monitor, layout.TileRegion)
+	monitorRect := rectFromPlatform(bounds)
+	adjustedMonitor := ApplyRegion(monitorRect, layout.TileRegion)
 	log.Printf("Tile region applied: %dx%d at %d,%d",
 		adjustedMonitor.Width, adjustedMonitor.Height, adjustedMonitor.X, adjustedMonitor.Y)
 
@@ -112,22 +113,22 @@ func (t *Tiler) TileCurrentMonitor() error {
 	}
 
 	// Step 4: Find all terminals on this monitor
-	terminalWindows, err := t.detector.FindTerminals(t.conn, monitor)
+	terminalWindows, err := t.detector.FindTerminals(t.backend, display.ID, bounds)
 	if err != nil {
 		log.Printf("Failed to find terminals: %v", err)
 		return err
 	}
 
-	log.Printf("Found %d terminal(s) on monitor %s", len(terminalWindows), monitor.Name)
+	log.Printf("Found %d terminal(s) on monitor %s", len(terminalWindows), display.Name)
 
 	if len(terminalWindows) == 0 {
 		log.Println("No terminals to tile")
 		return nil
 	}
 
-	sortTerminals(t.conn, terminalWindows, t.config.TerminalSort)
+	sortTerminals(t.backend, terminalWindows, t.config.TerminalSort)
 
-	previous := make(map[xproto.Window]Rect, len(terminalWindows))
+	previous := make(map[platform.WindowID]Rect, len(terminalWindows))
 	for _, term := range terminalWindows {
 		previous[term.WindowID] = Rect{
 			X:      term.X,
@@ -202,10 +203,9 @@ func (t *Tiler) TileCurrentMonitor() error {
 			continue
 		}
 
-		err := t.conn.MoveResizeWindow(
+		err := t.backend.MoveResize(
 			term.WindowID,
-			adjustedPos.X, adjustedPos.Y,
-			adjustedPos.Width, adjustedPos.Height,
+			platform.Rect{X: adjustedPos.X, Y: adjustedPos.Y, Width: adjustedPos.Width, Height: adjustedPos.Height},
 		)
 
 		if err != nil {
@@ -215,8 +215,8 @@ func (t *Tiler) TileCurrentMonitor() error {
 	}
 
 	// Step 7: Update workspace state
-	t.workspaces[monitor.ID] = &Workspace{
-		MonitorID:          monitor.ID,
+	t.workspaces[display.ID] = &Workspace{
+		MonitorID:          display.ID,
 		Terminals:          terminalWindows,
 		LastTiledAt:        time.Now(),
 		PreviousGeometries: previous,
@@ -250,14 +250,15 @@ func (t *Tiler) TileWithOrder(windowOrder []uint32) error {
 	log.Printf("Using layout: %s (mode: %s, region: %s)", layoutName, layout.Mode, layout.TileRegion.Type)
 
 	// Step 2: Get the active monitor
-	monitor, err := t.conn.GetActiveMonitor()
+	display, err := t.backend.ActiveDisplay()
 	if err != nil {
 		log.Printf("Failed to get active monitor: %v", err)
 		return err
 	}
 
+	bounds := display.Bounds
 	log.Printf("Active monitor: %s (%dx%d at %d,%d)",
-		monitor.Name, monitor.Width, monitor.Height, monitor.X, monitor.Y)
+		display.Name, bounds.Width, bounds.Height, bounds.X, bounds.Y)
 
 	// Apply screen padding to create a safe area
 	padding := t.config.ScreenPadding
@@ -265,24 +266,25 @@ func (t *Tiler) TileWithOrder(windowOrder []uint32) error {
 		log.Printf("Applying screen padding: top=%d, bottom=%d, left=%d, right=%d",
 			padding.Top, padding.Bottom, padding.Left, padding.Right)
 
-		monitor.X += padding.Left
-		monitor.Y += padding.Top
-		monitor.Width -= (padding.Left + padding.Right)
-		monitor.Height -= (padding.Top + padding.Bottom)
+		bounds.X += padding.Left
+		bounds.Y += padding.Top
+		bounds.Width -= (padding.Left + padding.Right)
+		bounds.Height -= (padding.Top + padding.Bottom)
 
-		if monitor.Width < 1 || monitor.Height < 1 {
+		if bounds.Width < 1 || bounds.Height < 1 {
 			return fmt.Errorf(
 				"screen_padding leaves no usable space: %dx%d at %d,%d",
-				monitor.Width, monitor.Height, monitor.X, monitor.Y,
+				bounds.Width, bounds.Height, bounds.X, bounds.Y,
 			)
 		}
 
 		log.Printf("Adjusted monitor area: %dx%d at %d,%d",
-			monitor.Width, monitor.Height, monitor.X, monitor.Y)
+			bounds.Width, bounds.Height, bounds.X, bounds.Y)
 	}
 
 	// Step 3: Apply tile region
-	adjustedMonitor := ApplyRegion(*monitor, layout.TileRegion)
+	monitorRect := rectFromPlatform(bounds)
+	adjustedMonitor := ApplyRegion(monitorRect, layout.TileRegion)
 	log.Printf("Tile region applied: %dx%d at %d,%d",
 		adjustedMonitor.Width, adjustedMonitor.Height, adjustedMonitor.X, adjustedMonitor.Y)
 
@@ -294,49 +296,57 @@ func (t *Tiler) TileWithOrder(windowOrder []uint32) error {
 	}
 
 	// Step 4: Find all terminals on this monitor
-	terminalWindows, err := t.detector.FindTerminals(t.conn, monitor)
+	terminalWindows, err := t.detector.FindTerminals(t.backend, display.ID, bounds)
 	if err != nil {
 		log.Printf("Failed to find terminals: %v", err)
 		return err
 	}
 
 	log.Printf("Found %d terminal(s) on monitor %s, ordering by %d provided window IDs",
-		len(terminalWindows), monitor.Name, len(windowOrder))
+		len(terminalWindows), display.Name, len(windowOrder))
 
 	if len(terminalWindows) == 0 {
 		log.Println("No terminals to tile")
 		return nil
 	}
 
-	// Build a map of window ID to terminal for quick lookup
+	// Build a map of window ID to terminal for quick lookup.
 	termByID := make(map[uint32]terminals.TerminalWindow, len(terminalWindows))
 	for _, term := range terminalWindows {
 		termByID[uint32(term.WindowID)] = term
 	}
 
-	// Reorder terminals according to windowOrder
-	orderedTerminals := make([]terminals.TerminalWindow, 0, len(windowOrder))
+	// Reorder terminals according to the explicit window order provided by workspace load.
+	orderedTerminals := make([]terminals.TerminalWindow, 0, len(terminalWindows))
+	matched := make(map[uint32]struct{}, len(windowOrder))
 	for _, wid := range windowOrder {
+		if _, already := matched[wid]; already {
+			log.Printf("Warning: duplicate window ID %d in provided order", wid)
+			continue
+		}
 		if term, ok := termByID[wid]; ok {
 			orderedTerminals = append(orderedTerminals, term)
-			delete(termByID, wid) // Remove from map to track unmatched
+			matched[wid] = struct{}{}
 		} else {
 			log.Printf("Warning: window ID %d from order not found on monitor", wid)
 		}
 	}
 
-	// Add any remaining terminals that weren't in the order list (sorted by position as fallback)
-	if len(termByID) > 0 {
-		remaining := make([]terminals.TerminalWindow, 0, len(termByID))
-		for _, term := range termByID {
-			remaining = append(remaining, term)
+	// Add any remaining terminals that weren't in the provided order.
+	// Preserve detector enumeration order; do not re-sort by position.
+	extra := 0
+	for _, term := range terminalWindows {
+		if _, ok := matched[uint32(term.WindowID)]; ok {
+			continue
 		}
-		sortTerminals(t.conn, remaining, t.config.TerminalSort)
-		orderedTerminals = append(orderedTerminals, remaining...)
-		log.Printf("Added %d extra terminals not in provided order", len(remaining))
+		orderedTerminals = append(orderedTerminals, term)
+		extra++
+	}
+	if extra > 0 {
+		log.Printf("Added %d extra terminals not in provided order (preserving detector order)", extra)
 	}
 
-	previous := make(map[xproto.Window]Rect, len(orderedTerminals))
+	previous := make(map[platform.WindowID]Rect, len(orderedTerminals))
 	for _, term := range orderedTerminals {
 		previous[term.WindowID] = Rect{
 			X:      term.X,
@@ -396,21 +406,19 @@ func (t *Tiler) TileWithOrder(windowOrder []uint32) error {
 			continue
 		}
 
-		err := t.conn.MoveResizeWindow(
+		err := t.backend.MoveResize(
 			term.WindowID,
-			adjustedPos.X, adjustedPos.Y,
-			adjustedPos.Width, adjustedPos.Height,
+			platform.Rect{X: adjustedPos.X, Y: adjustedPos.Y, Width: adjustedPos.Width, Height: adjustedPos.Height},
 		)
 
 		if err != nil {
 			log.Printf("Warning: Failed to tile terminal %d: %v", i+1, err)
-			// Continue with other windows even if one fails
 		}
 	}
 
 	// Step 7: Update workspace state
-	t.workspaces[monitor.ID] = &Workspace{
-		MonitorID:          monitor.ID,
+	t.workspaces[display.ID] = &Workspace{
+		MonitorID:          display.ID,
 		Terminals:          orderedTerminals,
 		LastTiledAt:        time.Now(),
 		PreviousGeometries: previous,
@@ -427,12 +435,12 @@ func (t *Tiler) UndoCurrentMonitor() error {
 
 	t.cancelPreviewLocked()
 
-	monitor, err := t.conn.GetActiveMonitor()
+	display, err := t.backend.ActiveDisplay()
 	if err != nil {
 		return err
 	}
 
-	ws := t.workspaces[monitor.ID]
+	ws := t.workspaces[display.ID]
 	if ws == nil || len(ws.PreviousGeometries) == 0 {
 		return nil
 	}
@@ -466,27 +474,30 @@ func (t *Tiler) PreviewLayout(layoutName string, duration time.Duration) error {
 		return err
 	}
 
-	monitor, err := t.conn.GetActiveMonitor()
+	display, err := t.backend.ActiveDisplay()
 	if err != nil {
 		return err
 	}
 
+	bounds := display.Bounds
+
 	// Apply screen padding to create a safe area
 	padding := t.config.ScreenPadding
 	if padding.Top != 0 || padding.Bottom != 0 || padding.Left != 0 || padding.Right != 0 {
-		monitor.X += padding.Left
-		monitor.Y += padding.Top
-		monitor.Width -= (padding.Left + padding.Right)
-		monitor.Height -= (padding.Top + padding.Bottom)
-		if monitor.Width < 1 || monitor.Height < 1 {
+		bounds.X += padding.Left
+		bounds.Y += padding.Top
+		bounds.Width -= (padding.Left + padding.Right)
+		bounds.Height -= (padding.Top + padding.Bottom)
+		if bounds.Width < 1 || bounds.Height < 1 {
 			return fmt.Errorf(
 				"screen_padding leaves no usable space: %dx%d at %d,%d",
-				monitor.Width, monitor.Height, monitor.X, monitor.Y,
+				bounds.Width, bounds.Height, bounds.X, bounds.Y,
 			)
 		}
 	}
 
-	adjustedMonitor := ApplyRegion(*monitor, layout.TileRegion)
+	monitorRect := rectFromPlatform(bounds)
+	adjustedMonitor := ApplyRegion(monitorRect, layout.TileRegion)
 	if adjustedMonitor.Width < 1 || adjustedMonitor.Height < 1 {
 		return fmt.Errorf(
 			"tile_region leaves no usable space: %dx%d at %d,%d",
@@ -494,7 +505,7 @@ func (t *Tiler) PreviewLayout(layoutName string, duration time.Duration) error {
 		)
 	}
 
-	terminalWindows, err := t.detector.FindTerminals(t.conn, monitor)
+	terminalWindows, err := t.detector.FindTerminals(t.backend, display.ID, bounds)
 	if err != nil {
 		return err
 	}
@@ -502,9 +513,9 @@ func (t *Tiler) PreviewLayout(layoutName string, duration time.Duration) error {
 		return nil
 	}
 
-	sortTerminals(t.conn, terminalWindows, t.config.TerminalSort)
+	sortTerminals(t.backend, terminalWindows, t.config.TerminalSort)
 
-	snapshot := make(map[xproto.Window]Rect, len(terminalWindows))
+	snapshot := make(map[platform.WindowID]Rect, len(terminalWindows))
 	for _, term := range terminalWindows {
 		snapshot[term.WindowID] = Rect{
 			X:      term.X,
@@ -541,10 +552,9 @@ func (t *Tiler) PreviewLayout(layoutName string, duration time.Duration) error {
 			continue
 		}
 
-		_ = t.conn.MoveResizeWindow(
+		_ = t.backend.MoveResize(
 			term.WindowID,
-			adjustedPos.X, adjustedPos.Y,
-			adjustedPos.Width, adjustedPos.Height,
+			platform.Rect{X: adjustedPos.X, Y: adjustedPos.Y, Width: adjustedPos.Width, Height: adjustedPos.Height},
 		)
 	}
 
@@ -581,13 +591,13 @@ func (t *Tiler) cancelPreviewLocked() {
 	t.previewSnapshot = nil
 }
 
-func (t *Tiler) restoreWindowsLocked(snapshot map[xproto.Window]Rect) {
+func (t *Tiler) restoreWindowsLocked(snapshot map[platform.WindowID]Rect) {
 	for windowID, rect := range snapshot {
-		_ = t.conn.MoveResizeWindow(windowID, rect.X, rect.Y, rect.Width, rect.Height)
+		_ = t.backend.MoveResize(windowID, platform.Rect{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height})
 	}
 }
 
-func sortTerminals(conn *x11.Connection, terminals []terminals.TerminalWindow, mode string) {
+func sortTerminals(backend platform.Backend, terminals []terminals.TerminalWindow, mode string) {
 	switch mode {
 	case "client_list":
 		return
@@ -596,7 +606,7 @@ func sortTerminals(conn *x11.Connection, terminals []terminals.TerminalWindow, m
 			return terminals[i].WindowID < terminals[j].WindowID
 		})
 	case "active_first":
-		activeWin, _ := conn.GetActiveWindow()
+		activeWin, _ := backend.ActiveWindow()
 		sort.SliceStable(terminals, func(i, j int) bool {
 			ti, tj := terminals[i], terminals[j]
 			if activeWin != 0 {
@@ -643,7 +653,7 @@ func (t *Tiler) GetWorkspace(monitorID int) *Workspace {
 	terminalsCopy := make([]terminals.TerminalWindow, len(ws.Terminals))
 	copy(terminalsCopy, ws.Terminals)
 
-	previousCopy := make(map[xproto.Window]Rect, len(ws.PreviousGeometries))
+	previousCopy := make(map[platform.WindowID]Rect, len(ws.PreviousGeometries))
 	for windowID, rect := range ws.PreviousGeometries {
 		previousCopy[windowID] = rect
 	}
@@ -742,4 +752,9 @@ func (t *Tiler) UpdateConfig(cfg *config.Config) {
 	}
 
 	t.activeLayout = cfg.DefaultLayout
+}
+
+// rectFromPlatform converts a platform.Rect to a tiling Rect.
+func rectFromPlatform(r platform.Rect) Rect {
+	return Rect{X: r.X, Y: r.Y, Width: r.Width, Height: r.Height}
 }

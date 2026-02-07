@@ -129,11 +129,13 @@ func appendMarker(task, marker string) string {
 //  3. Trimmed output (fallback)
 //
 // The marker runs first because the fence instruction text itself contains
-// the fence tags as literal text, and extractFencedResponse would match
-// those instead of the agent's actual response.
+// the fence tags as literal text ("...inside [termtile-response] and
+// [/termtile-response] tags..."). If the marker isn't found (e.g. scrolled
+// off-screen), we must NOT attempt fence extraction — it would match the
+// instruction's tags and extract the word "and".
 func trimOutput(output, marker string, responseFence bool) string {
-	trimmed := trimToAfterMarker(output, marker)
-	if responseFence {
+	trimmed, markerFound := trimToAfterMarker(output, marker)
+	if responseFence && markerFound {
 		if fenced, ok := extractFencedResponse(trimmed); ok {
 			return fenced
 		}
@@ -141,24 +143,30 @@ func trimOutput(output, marker string, responseFence bool) string {
 	return trimmed
 }
 
-// trimToAfterMarker scans the output for the agent marker and returns
-// only the content that follows it. This strips startup banners, welcome
-// messages, fence instructions, and the task text itself — everything
-// before the agent's actual response.
-func trimToAfterMarker(output, marker string) string {
+// trimToAfterMarker scans the output for the LAST occurrence of the agent
+// marker and returns only the content that follows it, along with whether
+// the marker was found. Uses the last occurrence because the marker appears
+// multiple times in the terminal output: once in the shell command echo
+// and once in the agent TUI's echo. The last one is closest to the actual
+// response and reliably separates the instruction/task from the answer.
+func trimToAfterMarker(output, marker string) (string, bool) {
 	if marker == "" {
-		return output
+		return output, false
 	}
 
 	lines := strings.Split(output, "\n")
+	lastIdx := -1
 	for i, line := range lines {
 		if strings.Contains(line, marker) {
-			remaining := strings.Join(lines[i+1:], "\n")
-			return strings.TrimLeft(remaining, "\n")
+			lastIdx = i
 		}
 	}
+	if lastIdx < 0 {
+		return output, false
+	}
 
-	return output
+	remaining := strings.Join(lines[lastIdx+1:], "\n")
+	return strings.TrimLeft(remaining, "\n"), true
 }
 
 // stripControlChars removes control characters from a line,
