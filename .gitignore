@@ -49,8 +49,9 @@ Desktop.ini
 \#*\#
 .#*
 
-# Agent and task management (local-only)
-.brainfile/
+# Agent and task management (local-only, except brainfile.md)
+.brainfile/*
+!.brainfile/brainfile.md
 .claude/
 CLAUDE.md
 
