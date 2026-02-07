@@ -1,5 +1,7 @@
 package mcp
 
+import "time"
+
 // SpawnAgentInput is the input for the spawn_agent tool.
 type SpawnAgentInput struct {
 	AgentType string  `json:"agent_type" jsonschema:"required,The agent type from config (e.g. claude, codex, aider)"`
@@ -8,6 +10,10 @@ type SpawnAgentInput struct {
 	Task      string  `json:"task,omitempty" jsonschema:"Initial task/prompt to send after agent starts. When prompt_as_arg is true for the agent, the task is passed as a CLI argument for instant delivery; otherwise it is sent via tmux send-keys after the agent is ready."`
 	Model     *string `json:"model,omitempty" jsonschema:"Optional model name to pass to the agent CLI. If omitted, the agent config default_model is used when configured."`
 	Window    *bool   `json:"window,omitempty" jsonschema:"When true, spawn the agent in a new terminal window instead of a tmux pane. Overrides the agent's configured spawn_mode."`
+	DependsOn []int   `json:"depends_on,omitempty" jsonschema:"Optional list of slot numbers that must be idle before spawning this agent. If any dependency slot is missing or killed, spawn fails."`
+	// DependsOnTimeout is only used when DependsOn is set.
+	// Value is seconds; default is 300.
+	DependsOnTimeout int `json:"depends_on_timeout,omitempty" jsonschema:"Timeout in seconds to wait for depends_on slots to become idle (default: 300). Only used when depends_on is set."`
 }
 
 // SpawnAgentOutput is the output for the spawn_agent tool.
@@ -90,4 +96,22 @@ type WaitForIdleOutput struct {
 	IsIdle      bool   `json:"is_idle"`
 	Output      string `json:"output"`
 	SessionName string `json:"session_name"`
+}
+
+// GetArtifactArgs is the input for the get_artifact tool.
+type GetArtifactArgs struct {
+	Slot      int    `json:"slot" jsonschema:"required,Slot index to fetch artifact from"`
+	Workspace string `json:"workspace,omitempty" jsonschema:"Workspace name (default: active workspace on current desktop; fallback: mcp-agents)"`
+}
+
+// GetArtifactOutput is the output for the get_artifact tool.
+type GetArtifactOutput struct {
+	Workspace      string    `json:"workspace"`
+	Slot           int       `json:"slot"`
+	Output         string    `json:"output"`
+	Truncated      bool      `json:"truncated"`
+	Warning        string    `json:"warning,omitempty"`
+	OriginalBytes  int       `json:"original_bytes"`
+	StoredBytes    int       `json:"stored_bytes"`
+	LastUpdatedUTC time.Time `json:"last_updated_utc"`
 }

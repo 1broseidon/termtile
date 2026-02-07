@@ -32,6 +32,10 @@ type trackedAgent struct {
 	spawnMode      string // "pane" or "window"
 	responseFence  bool   // true if fence instructions were prepended to the task
 	fencePairCount int    // baseline count of standalone close tags at last task send
+	// lastArtifactCloseCount tracks the last close-tag count for which we captured
+	// and stored an artifact. Used to avoid repeatedly capturing full scrollback
+	// on every checkIdle poll once the agent is idle.
+	lastArtifactCloseCount int
 }
 
 // Server is the MCP server for termtile agent orchestration.
@@ -40,10 +44,16 @@ type Server struct {
 	config      *config.Config
 	multiplexer *agent.TmuxMultiplexer
 	logger      *agent.Logger
+	artifacts   *ArtifactStore
 
 	mu       sync.Mutex
 	tracked  map[string]map[int]trackedAgent // workspace -> slot -> info
 	nextSlot map[string]int                  // workspace -> next slot
+
+	// Dependency waiting hooks (primarily for tests).
+	idleCheckFn     func(target, agentType, workspace string, slot int) bool
+	targetExistsFn  func(target string) bool
+	depPollInterval time.Duration
 }
 
 // NewServer creates a new MCP server backed by tmux.
@@ -73,12 +83,16 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 
 	s := &Server{
-		config:      cfg,
-		multiplexer: mux,
-		logger:      logger,
-		tracked:     make(map[string]map[int]trackedAgent),
-		nextSlot:    make(map[string]int),
+		config:          cfg,
+		multiplexer:     mux,
+		logger:          logger,
+		artifacts:       NewArtifactStore(DefaultArtifactCapBytes),
+		tracked:         make(map[string]map[int]trackedAgent),
+		nextSlot:        make(map[string]int),
+		targetExistsFn:  tmuxTargetExists,
+		depPollInterval: 2 * time.Second,
 	}
+	s.idleCheckFn = s.checkIdle
 	s.reconcile()
 
 	s.mcpServer = mcpsdk.NewServer(
@@ -109,7 +123,7 @@ func (s *Server) Close() error {
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
 		Name:        "spawn_agent",
-		Description: "Spawn a new AI agent in a terminal slot. The agent type must be configured in termtile's agents config. Returns the slot number for future reference.",
+		Description: "Spawn a new AI agent in a terminal slot. The agent type must be configured in termtile's agents config. Optionally wait for other slots to become idle first via depends_on (polling every 2s up to depends_on_timeout, default 300s). Returns the slot number for future reference.",
 	}, s.handleSpawnAgent)
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
@@ -128,6 +142,11 @@ func (s *Server) registerTools() {
 	}, s.handleWaitForIdle)
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
+		Name:        "get_artifact",
+		Description: "Fetch the last captured output artifact for a workspace slot. Artifacts are stored in memory (not persisted) and are cleared when the slot is killed or pruned.",
+	}, s.handleGetArtifact)
+
+	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
 		Name:        "list_agents",
 		Description: "List all running agents in a workspace with their status (idle/busy, current command).",
 	}, s.handleListAgents)
@@ -136,6 +155,94 @@ func (s *Server) registerTools() {
 		Name:        "kill_agent",
 		Description: "Kill an agent running in a specific terminal slot by destroying its tmux session.",
 	}, s.handleKillAgent)
+}
+
+func (s *Server) waitForDependencies(workspace string, slots []int, timeoutSeconds int) error {
+	if len(slots) == 0 {
+		return nil
+	}
+
+	// Normalize: validate and de-dupe while preserving first-seen order.
+	unique := make([]int, 0, len(slots))
+	seen := make(map[int]struct{}, len(slots))
+	for _, slot := range slots {
+		if slot < 0 {
+			return fmt.Errorf("depends_on contains negative slot %d", slot)
+		}
+		if _, ok := seen[slot]; ok {
+			continue
+		}
+		seen[slot] = struct{}{}
+		unique = append(unique, slot)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+
+	poll := s.depPollInterval
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+
+	checkIdle := s.idleCheckFn
+	if checkIdle == nil {
+		checkIdle = s.checkIdle
+	}
+	targetExists := s.targetExistsFn
+	if targetExists == nil {
+		targetExists = tmuxTargetExists
+	}
+
+	checkAll := func() (bool, error) {
+		for _, slot := range unique {
+			target, ok := s.getTmuxTarget(workspace, slot)
+			if !ok {
+				return false, fmt.Errorf("dependency slot %d not tracked in workspace %q", slot, workspace)
+			}
+			if strings.TrimSpace(target) == "" {
+				return false, fmt.Errorf("dependency slot %d has empty tmux target in workspace %q", slot, workspace)
+			}
+			if !targetExists(target) {
+				return false, fmt.Errorf("dependency slot %d (target %s) is not alive (killed)", slot, target)
+			}
+
+			agentType := s.getAgentType(workspace, slot)
+			if !checkIdle(target, agentType, workspace, slot) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+
+	// Fast path: all deps are already idle.
+	if ok, err := checkAll(); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if ok, err := checkAll(); err != nil {
+				return err
+			} else if ok {
+				return nil
+			}
+		case <-timer.C:
+			return fmt.Errorf("timeout waiting for dependency slots %v to become idle after %s", unique, timeout)
+		}
+	}
 }
 
 // reconcile rebuilds startup tracking state from existing termtile tmux sessions.
@@ -234,6 +341,9 @@ func (s *Server) anyPaneModeTarget(workspace string) string {
 		}
 		// Target was killed externally — prune it.
 		delete(ws, slot)
+		if s.artifacts != nil {
+			s.artifacts.Clear(workspace, slot)
+		}
 	}
 	return ""
 }
@@ -281,10 +391,12 @@ func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode string
 		s.tracked[workspace] = make(map[int]trackedAgent)
 	}
 	s.tracked[workspace][slot] = trackedAgent{
-		agentType:     agentType,
-		tmuxTarget:    tmuxTarget,
-		spawnMode:     spawnMode,
-		responseFence: responseFence,
+		agentType:              agentType,
+		tmuxTarget:             tmuxTarget,
+		spawnMode:              spawnMode,
+		responseFence:           responseFence,
+		fencePairCount:          0,
+		lastArtifactCloseCount:  0,
 	}
 
 	return slot
@@ -310,10 +422,12 @@ func (s *Server) updateTmuxTarget(workspace string, slot int, tmuxTarget string)
 // removeTracked removes a slot from the tracking map.
 func (s *Server) removeTracked(workspace string, slot int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if ws, ok := s.tracked[workspace]; ok {
 		delete(ws, slot)
+	}
+	s.mu.Unlock()
+	if s.artifacts != nil {
+		s.artifacts.Clear(workspace, slot)
 	}
 }
 
@@ -397,10 +511,14 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 	// stored when the task was sent. Close tags are used instead of full
 	// pairs because the opening tag may scroll off the capture window for
 	// long responses, while the close tag stays near the bottom.
-	hasFence, baselineCount := s.getFenceState(workspace, slot)
+	hasFence, baselineCount, lastArtifactCount := s.getFenceCaptureCounts(workspace, slot)
 	if hasFence {
 		currentCount := countCloseTags(out)
 		if currentCount > baselineCount {
+			// Capture the full fenced output exactly once per close-tag increment.
+			if s.artifacts != nil && currentCount > lastArtifactCount {
+				s.captureAndStoreFenceArtifact(target, workspace, slot, currentCount)
+			}
 			return true
 		}
 		// Fence expected but no new response yet — the agent is still working.
@@ -432,6 +550,55 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 		return true
 	}
 	return false
+}
+
+// captureAndStoreFenceArtifact captures full scrollback for a fence-enabled slot,
+// extracts the last response content, and stores it as an artifact. Best-effort:
+// capture failures do not change the idle decision.
+func (s *Server) captureAndStoreFenceArtifact(target, workspace string, slot int, closeTagCount int) {
+	// Full scrollback required to reliably find the opening tag for long responses.
+	full, err := tmuxCapturePane(target, 0)
+	if err != nil {
+		return
+	}
+	cleaned := trimOutput(cleanOutput(full), true)
+	s.artifacts.Set(workspace, slot, cleaned)
+	s.setLastArtifactCloseCount(workspace, slot, closeTagCount)
+}
+
+// captureAndStoreArtifactForSlot captures the most recent output for a slot and
+// stores it as an artifact. For fence-enabled slots, it captures full scrollback
+// so the opening tag can be found for long responses.
+func (s *Server) captureAndStoreArtifactForSlot(workspace string, slot int) error {
+	if s == nil || s.artifacts == nil {
+		return fmt.Errorf("artifact store not initialized")
+	}
+	target, ok := s.getTmuxTarget(workspace, slot)
+	if !ok {
+		return fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, slot)
+	}
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("slot %d has empty tmux target in workspace %q", slot, workspace)
+	}
+	if !tmuxTargetExists(target) {
+		return fmt.Errorf("slot %d (target %s) is not alive (killed)", slot, target)
+	}
+
+	fence, _ := s.getFenceState(workspace, slot)
+	captureLines := 200
+	if fence {
+		captureLines = 0 // full scrollback for reliable fence extraction
+	}
+	raw, err := tmuxCapturePane(target, captureLines)
+	if err != nil {
+		return err
+	}
+	cleaned := trimOutput(cleanOutput(raw), fence)
+	s.artifacts.Set(workspace, slot, cleaned)
+	if fence {
+		s.setLastArtifactCloseCount(workspace, slot, countCloseTags(raw))
+	}
+	return nil
 }
 
 // lastNonEmptyLine returns the last non-blank line from text.
@@ -485,6 +652,23 @@ func (s *Server) getFenceState(workspace string, slot int) (hasFence bool, pairC
 	return ta.responseFence, ta.fencePairCount
 }
 
+// getFenceCaptureCounts returns the fence baseline close-tag count and the last
+// close-tag count for which we captured an artifact.
+func (s *Server) getFenceCaptureCounts(workspace string, slot int) (hasFence bool, baseline int, lastArtifact int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return false, 0, 0
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return false, 0, 0
+	}
+	return ta.responseFence, ta.fencePairCount, ta.lastArtifactCloseCount
+}
+
 // updateFenceState updates the fence detection state for a tracked slot.
 func (s *Server) updateFenceState(workspace string, slot int, responseFence bool, pairCount int) {
 	s.mu.Lock()
@@ -500,6 +684,28 @@ func (s *Server) updateFenceState(workspace string, slot int, responseFence bool
 	}
 	ta.responseFence = responseFence
 	ta.fencePairCount = pairCount
+	if responseFence {
+		// Reset artifact capture counter to the baseline at send time.
+		ta.lastArtifactCloseCount = pairCount
+	} else {
+		ta.lastArtifactCloseCount = 0
+	}
+	ws[slot] = ta
+}
+
+func (s *Server) setLastArtifactCloseCount(workspace string, slot int, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return
+	}
+	ta.lastArtifactCloseCount = count
 	ws[slot] = ta
 }
 

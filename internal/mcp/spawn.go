@@ -3,7 +3,32 @@ package mcp
 import (
 	"fmt"
 	"strings"
+
+	"github.com/1broseidon/termtile/internal/config"
 )
+
+// spawnAgentWithDependencies waits for depends_on slots (if provided) then
+// spawns the agent exactly as current behavior.
+func (s *Server) spawnAgentWithDependencies(workspaceName, agentType, cwd, agentCmd, spawnMode string, responseFence bool, agentCfg config.AgentConfig, dependsOn []int, dependsOnTimeout int) (string, int, error) {
+	if len(dependsOn) > 0 {
+		if err := s.waitForDependencies(workspaceName, dependsOn, dependsOnTimeout); err != nil {
+			return "", 0, err
+		}
+	}
+
+	if spawnMode == "window" {
+		// Window mode: spawn a shell session, then send the agent command.
+		target, slot, err := s.spawnWindow(workspaceName, agentType, cwd, responseFence, agentCfg)
+		if err != nil {
+			return "", 0, err
+		}
+		s.waitForShellAndSend(target, agentCmd)
+		return target, slot, nil
+	}
+
+	// Pane mode: spawn directly running the agent command.
+	return s.spawnPane(workspaceName, agentType, agentCmd, cwd, responseFence, agentCfg)
+}
 
 // renderSpawnTemplate fills {{dir}} and {{cmd}} placeholders in a terminal
 // spawn template and returns an exec-ready argv.

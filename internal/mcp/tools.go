@@ -71,12 +71,56 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	spawnMode := resolveSpawnMode(args.Window, agentCfg.SpawnMode)
 
+	// If depends_on is set, wait now so we can substitute slot artifacts into the
+	// task prompt BEFORE spawning (needed for prompt_as_arg agents).
+	if len(args.DependsOn) > 0 {
+		if err := s.waitForDependencies(workspaceName, args.DependsOn, args.DependsOnTimeout); err != nil {
+			if s.logger != nil {
+				details := map[string]interface{}{
+					"agent_type":          args.AgentType,
+					"spawn_mode":          spawnMode,
+					"depends_on_count":    len(args.DependsOn),
+					"depends_on_timeout":  args.DependsOnTimeout,
+					"error":              "depends_on_failed",
+					"depends_on_message":  err.Error(),
+				}
+				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, details)
+			}
+			return nil, SpawnAgentOutput{}, err
+		}
+
+		// Ensure artifacts exist for dependency slots (best-effort capture after idle).
+		seen := make(map[int]struct{}, len(args.DependsOn))
+		for _, dep := range args.DependsOn {
+			if _, ok := seen[dep]; ok {
+				continue
+			}
+			seen[dep] = struct{}{}
+			if s.artifacts != nil {
+				if _, ok := s.artifacts.Get(workspaceName, dep); ok {
+					continue
+				}
+			}
+			if err := s.captureAndStoreArtifactForSlot(workspaceName, dep); err != nil {
+				return nil, SpawnAgentOutput{}, fmt.Errorf("failed to capture artifact for dependency slot %d: %w", dep, err)
+			}
+		}
+	}
+
 	// Determine the task text to send to the agent.
 	// When response_fence is enabled, prepend structured output instructions.
-	responseFence := agentCfg.ResponseFence && args.Task != ""
-	taskToSend := args.Task
-	if args.Task != "" && responseFence {
-		taskToSend = wrapTaskWithFence(args.Task)
+	taskTemplate := args.Task
+	if taskTemplate != "" && len(args.DependsOn) > 0 {
+		expanded, missing := substituteSlotOutputTemplates(taskTemplate, workspaceName, args.DependsOn, s.artifacts)
+		taskTemplate = expanded
+		if len(missing) > 0 {
+			log.Printf("Warning: missing artifacts for workspace %q dependency slots %v", workspaceName, missing)
+		}
+	}
+	responseFence := agentCfg.ResponseFence && taskTemplate != ""
+	taskToSend := taskTemplate
+	if taskTemplate != "" && responseFence {
+		taskToSend = wrapTaskWithFence(taskTemplate)
 	}
 
 	// Build the agent command string: "command arg1 arg2 ..."
@@ -102,7 +146,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 
 	// When PromptAsArg is true and a task is provided, append the task
 	// as a CLI argument instead of sending it via tmux send-keys later.
-	promptInCmd := agentCfg.PromptAsArg && args.Task != ""
+	promptInCmd := agentCfg.PromptAsArg && taskTemplate != ""
 	if promptInCmd && len(taskToSend) > 32*1024 {
 		promptInCmd = false
 	}
@@ -111,51 +155,38 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 	}
 	agentCmd := strings.Join(cmdParts, " ")
 
-	var tmuxTarget string
-	var slot int
-
-	if spawnMode == "window" {
-		// Window mode: start tmux with the default shell (so that
-		// .zshrc/.bashrc are sourced and tool paths like proto/nvm are
-		// available), then send the agent command via send-keys.
-		target, s2, err := s.spawnWindow(workspaceName, args.AgentType, args.Cwd, responseFence, agentCfg)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
-					"agent_type": args.AgentType,
-					"spawn_mode": spawnMode,
-					"error":      "spawn_failed",
-				})
+	tmuxTarget, slot, err := s.spawnAgentWithDependencies(
+		workspaceName,
+		args.AgentType,
+		args.Cwd,
+		agentCmd,
+		spawnMode,
+		responseFence,
+		agentCfg,
+		nil,
+		0,
+	)
+	if err != nil {
+		if s.logger != nil {
+			details := map[string]interface{}{
+				"agent_type": args.AgentType,
+				"spawn_mode": spawnMode,
 			}
-			return nil, SpawnAgentOutput{}, err
-		}
-		tmuxTarget = target
-		slot = s2
-
-		// Wait for the shell to become ready, then send the agent command.
-		s.waitForShellAndSend(tmuxTarget, agentCmd)
-
-		// If the task was baked into the agent command (promptInCmd),
-		// we're done. Otherwise fall through to waitAndSendTask below.
-	} else {
-		target, s2, err := s.spawnPane(workspaceName, args.AgentType, agentCmd, args.Cwd, responseFence, agentCfg)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
-					"agent_type": args.AgentType,
-					"spawn_mode": spawnMode,
-					"error":      "spawn_failed",
-				})
+			if len(args.DependsOn) > 0 {
+				details["depends_on_count"] = len(args.DependsOn)
+				details["depends_on_timeout"] = args.DependsOnTimeout
+				details["error"] = "depends_on_failed"
+			} else {
+				details["error"] = "spawn_failed"
 			}
-			return nil, SpawnAgentOutput{}, err
+			s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, details)
 		}
-		tmuxTarget = target
-		slot = s2
+		return nil, SpawnAgentOutput{}, err
 	}
 
 	// If a task is provided and wasn't passed as a CLI argument,
 	// wait until the agent is ready then send via tmux send-keys.
-	if args.Task != "" && !promptInCmd {
+	if taskTemplate != "" && !promptInCmd {
 		s.waitAndSendTask(tmuxTarget, args.AgentType, taskToSend, agentCfg)
 	}
 
@@ -165,12 +196,16 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 			"spawn_mode":    spawnMode,
 			"cwd":           args.Cwd,
 			"prompt_as_arg": promptInCmd,
-			"has_task":      args.Task != "",
+			"has_task":      taskTemplate != "",
+		}
+		if len(args.DependsOn) > 0 {
+			details["depends_on_count"] = len(args.DependsOn)
+			details["depends_on_timeout"] = args.DependsOnTimeout
 		}
 		if selectedModel != "" {
 			details["model"] = selectedModel
 		}
-		s.addTextDetails(details, args.Task)
+		s.addTextDetails(details, taskTemplate)
 		s.logger.Log(agent.ActionSpawnAgent, workspaceName, slot, details)
 	}
 
@@ -724,6 +759,29 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 	}, nil
 }
 
+func (s *Server) handleGetArtifact(_ context.Context, _ *mcpsdk.CallToolRequest, args GetArtifactArgs) (*mcpsdk.CallToolResult, GetArtifactOutput, error) {
+	workspaceName := resolveWorkspaceName(args.Workspace)
+	if s == nil || s.artifacts == nil {
+		return nil, GetArtifactOutput{}, fmt.Errorf("artifact store not initialized")
+	}
+	art, ok := s.artifacts.Get(workspaceName, args.Slot)
+	if !ok {
+		return nil, GetArtifactOutput{}, fmt.Errorf("no artifact for workspace %q slot %d", workspaceName, args.Slot)
+	}
+	// Ensure returned workspace is normalized to the request workspace.
+	art.Workspace = workspaceName
+	return nil, GetArtifactOutput{
+		Workspace:      art.Workspace,
+		Slot:           art.Slot,
+		Output:         art.Output,
+		Truncated:      art.Truncated,
+		Warning:        art.Warning,
+		OriginalBytes:  art.OriginalBytes,
+		StoredBytes:    art.StoredBytes,
+		LastUpdatedUTC: art.LastUpdatedUTC,
+	}, nil
+}
+
 func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest, args WaitForIdleInput) (*mcpsdk.CallToolResult, WaitForIdleOutput, error) {
 	workspaceName := resolveWorkspaceName(args.Workspace)
 	target, ok := s.getTmuxTarget(workspaceName, args.Slot)
@@ -775,6 +833,9 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 				return nil, WaitForIdleOutput{}, fmt.Errorf("failed to capture output from slot %d (target %s): %w", args.Slot, target, err)
 			}
 			cleanedOutput := trimOutput(cleanOutput(output), fence)
+			if s.artifacts != nil {
+				s.artifacts.Set(workspaceName, args.Slot, cleanedOutput)
+			}
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,
@@ -797,6 +858,9 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 			// Timeout: return whatever output is available.
 			output, _ := tmuxCapturePane(target, lines)
 			cleanedOutput := trimOutput(cleanOutput(output), fence)
+			if s.artifacts != nil {
+				s.artifacts.Set(workspaceName, args.Slot, cleanedOutput)
+			}
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,
