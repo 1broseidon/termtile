@@ -73,16 +73,10 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 
 	// Determine the task text to send to the agent.
 	// When response_fence is enabled, prepend structured output instructions.
-	// A unique marker is appended as the last line for reliable output trimming.
 	responseFence := agentCfg.ResponseFence && args.Task != ""
-	var taskMarker string
 	taskToSend := args.Task
-	if args.Task != "" {
-		taskMarker = generateMarker()
-		if responseFence {
-			taskToSend = wrapTaskWithFence(args.Task)
-		}
-		taskToSend = appendMarker(taskToSend, taskMarker)
+	if args.Task != "" && responseFence {
+		taskToSend = wrapTaskWithFence(args.Task)
 	}
 
 	// Build the agent command string: "command arg1 arg2 ..."
@@ -124,7 +118,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		// Window mode: start tmux with the default shell (so that
 		// .zshrc/.bashrc are sourced and tool paths like proto/nvm are
 		// available), then send the agent command via send-keys.
-		target, s2, err := s.spawnWindow(workspaceName, args.AgentType, args.Cwd, taskMarker, responseFence, agentCfg)
+		target, s2, err := s.spawnWindow(workspaceName, args.AgentType, args.Cwd, responseFence, agentCfg)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
@@ -144,7 +138,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		// If the task was baked into the agent command (promptInCmd),
 		// we're done. Otherwise fall through to waitAndSendTask below.
 	} else {
-		target, s2, err := s.spawnPane(workspaceName, args.AgentType, agentCmd, args.Cwd, taskMarker, responseFence, agentCfg)
+		target, s2, err := s.spawnPane(workspaceName, args.AgentType, agentCmd, args.Cwd, responseFence, agentCfg)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Log(agent.ActionSpawnAgent, workspaceName, -1, map[string]interface{}{
@@ -190,7 +184,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 }
 
 // spawnPane creates a new tmux pane (existing behavior).
-func (s *Server) spawnPane(workspace, agentType, fullCmd, cwd, taskMarker string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
+func (s *Server) spawnPane(workspace, agentType, fullCmd, cwd string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
 	// Determine where to create the pane.
 	// If we already have pane-mode agents in this workspace, split from one of them.
 	// Otherwise, split the active pane in the user's attached tmux session.
@@ -233,7 +227,7 @@ func (s *Server) spawnPane(workspace, agentType, fullCmd, cwd, taskMarker string
 	// Rebalance the layout so all panes are visible.
 	_ = exec.Command("tmux", "select-layout", "-t", tmuxTarget, "tiled").Run()
 
-	slot := s.allocateSlot(workspace, agentType, tmuxTarget, "pane", taskMarker, responseFence)
+	slot := s.allocateSlot(workspace, agentType, tmuxTarget, "pane", responseFence)
 	return tmuxTarget, slot, nil
 }
 
@@ -241,7 +235,7 @@ func (s *Server) spawnPane(workspace, agentType, fullCmd, cwd, taskMarker string
 // user's default shell. The agent command is NOT baked into the tmux session
 // command — it is sent via send-keys afterward so that shell init files
 // (.zshrc, .bashrc) are sourced and tool paths (proto, nvm, etc.) are available.
-func (s *Server) spawnWindow(workspace, agentType, cwd, taskMarker string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
+func (s *Server) spawnWindow(workspace, agentType, cwd string, responseFence bool, agentCfg config.AgentConfig) (string, int, error) {
 	// Resolve which terminal emulator to use.
 	// Prefer the terminal class from the workspace config (matches what the
 	// workspace was saved with), falling back to the global config.
@@ -261,7 +255,7 @@ func (s *Server) spawnWindow(workspace, agentType, cwd, taskMarker string, respo
 		return "", 0, fmt.Errorf("no spawn template for terminal class %q; add it to terminal_spawn_commands", termClass)
 	}
 
-	slot := s.allocateSlot(workspace, agentType, "", "window", taskMarker, responseFence)
+	slot := s.allocateSlot(workspace, agentType, "", "window", responseFence)
 	registryDesktop := -1
 	registrySlot := -1
 	if wsInfo, err := workspacepkg.GetWorkspaceByName(workspace); err == nil {
@@ -449,17 +443,18 @@ func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest,
 
 	textToSend := args.Text
 	agentType := s.getAgentType(workspaceName, args.Slot)
-	taskMarker := ""
 	responseFence := false
-	if args.Text != "" {
-		taskMarker = generateMarker()
-		if agentType != "" {
-			if agentCfg, ok := s.config.Agents[agentType]; ok && agentCfg.ResponseFence {
-				responseFence = true
-				textToSend = wrapTaskWithFence(args.Text)
+	if args.Text != "" && agentType != "" {
+		if agentCfg, ok := s.config.Agents[agentType]; ok && agentCfg.ResponseFence {
+			responseFence = true
+			// Snapshot current standalone close-tag count BEFORE sending so
+			// checkIdle can detect the new response by comparing counts.
+			if out, err := tmuxCapturePane(target, 100); err == nil {
+				baseline := countCloseTags(out)
+				s.updateFenceState(workspaceName, args.Slot, true, baseline)
 			}
+			textToSend = wrapTaskWithFence(args.Text)
 		}
-		textToSend = appendMarker(textToSend, taskMarker)
 	}
 
 	if err := tmuxSendKeys(target, textToSend); err != nil {
@@ -475,17 +470,11 @@ func (s *Server) handleSendToAgent(_ context.Context, _ *mcpsdk.CallToolRequest,
 		}
 		return nil, nil, fmt.Errorf("failed to send to slot %d (target %s): %w", args.Slot, target, err)
 	}
-	if taskMarker != "" {
-		s.updateOutputConfig(workspaceName, args.Slot, taskMarker, responseFence)
-	}
 	if s.logger != nil {
 		details := map[string]interface{}{
 			"agent_type":     agentType,
 			"response_fence": responseFence,
 			"sent_length":    len(textToSend),
-		}
-		if taskMarker != "" {
-			details["task_marker"] = taskMarker
 		}
 		s.addTextDetails(details, args.Text)
 		s.logger.Log(agent.ActionSend, workspaceName, args.Slot, details)
@@ -516,7 +505,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		lines = 50
 	}
 
-	marker, fence := s.getOutputConfig(workspaceName, args.Slot)
+	fence, _ := s.getFenceState(workspaceName, args.Slot)
 
 	// When a pattern is provided, poll until it appears or timeout.
 	if args.Pattern != "" {
@@ -529,7 +518,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		if args.Clean {
 			output = cleanOutput(output)
 		}
-		output = trimOutput(output, marker, fence)
+		output = trimOutput(output, fence)
 
 		if err != nil {
 			// Timeout: return found=false with whatever output we captured.
@@ -574,7 +563,13 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 	}
 
 	// One-shot read (no pattern).
-	output, err := tmuxCapturePane(target, lines)
+	// When fence is active, capture full scrollback so extraction can
+	// find both opening and closing tags for long responses.
+	captureLines := lines
+	if fence {
+		captureLines = 0
+	}
+	output, err := tmuxCapturePane(target, captureLines)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Log(agent.ActionRead, workspaceName, args.Slot, map[string]interface{}{
@@ -591,7 +586,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		output = cleanOutput(output)
 	}
 
-	output = trimOutput(output, marker, fence)
+	output = trimOutput(output, fence)
 	if s.logger != nil {
 		details := map[string]interface{}{
 			"agent_type": agentType,
@@ -751,13 +746,21 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 	}
 
 	agentType := s.getAgentType(workspaceName, args.Slot)
-	marker, fence := s.getOutputConfig(workspaceName, args.Slot)
+	fence, _ := s.getFenceState(workspaceName, args.Slot)
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 
 	for {
 		if s.checkIdle(target, agentType, workspaceName, args.Slot) {
-			output, err := tmuxCapturePane(target, lines)
+			// When fence is active, capture full scrollback so we can
+			// find both the opening and closing tags for extraction,
+			// even for long responses where the opening tag scrolled
+			// past the default capture window.
+			captureLines := lines
+			if fence {
+				captureLines = 0 // full scrollback
+			}
+			output, err := tmuxCapturePane(target, captureLines)
 			if err != nil {
 				if s.logger != nil {
 					s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, map[string]interface{}{
@@ -771,7 +774,7 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 				}
 				return nil, WaitForIdleOutput{}, fmt.Errorf("failed to capture output from slot %d (target %s): %w", args.Slot, target, err)
 			}
-			cleanedOutput := trimOutput(cleanOutput(output), marker, fence)
+			cleanedOutput := trimOutput(cleanOutput(output), fence)
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,
@@ -793,7 +796,7 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 		if time.Now().After(deadline) {
 			// Timeout: return whatever output is available.
 			output, _ := tmuxCapturePane(target, lines)
-			cleanedOutput := trimOutput(cleanOutput(output), marker, fence)
+			cleanedOutput := trimOutput(cleanOutput(output), fence)
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,

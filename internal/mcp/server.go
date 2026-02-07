@@ -27,11 +27,11 @@ const (
 
 // trackedAgent records which agent type occupies a workspace slot.
 type trackedAgent struct {
-	agentType     string
-	tmuxTarget    string // pane ID ("%5") or session target ("termtile-ws-0:0.0")
-	spawnMode     string // "pane" or "window"
-	taskMarker    string // unique short marker appended to task, used as output delimiter
-	responseFence bool   // true if fence instructions were prepended to the task
+	agentType      string
+	tmuxTarget     string // pane ID ("%5") or session target ("termtile-ws-0:0.0")
+	spawnMode      string // "pane" or "window"
+	responseFence  bool   // true if fence instructions were prepended to the task
+	fencePairCount int    // baseline count of standalone close tags at last task send
 }
 
 // Server is the MCP server for termtile agent orchestration.
@@ -270,7 +270,7 @@ func (s *Server) peekNextSlot(workspace string) int {
 }
 
 // allocateSlot returns the next available slot for a workspace and tracks the agent.
-func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode, taskMarker string, responseFence bool) int {
+func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode string, responseFence bool) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -284,7 +284,6 @@ func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode, taskM
 		agentType:     agentType,
 		tmuxTarget:    tmuxTarget,
 		spawnMode:     spawnMode,
-		taskMarker:    taskMarker,
 		responseFence: responseFence,
 	}
 
@@ -379,38 +378,32 @@ func shellQuote(s string) string {
 }
 
 // checkIdle determines whether an agent in a tmux target is idle.
-// It uses a two-tier strategy:
+// It uses a three-tier strategy:
+//  0. Fence pair counting: scan all [termtile-response] pairs, filter out
+//     instruction echoes (content == "and"), compare real pair count against
+//     the baseline stored when the task was sent.
 //  1. Content-based: if the agent has an IdlePattern configured, scan the last
-//     few non-empty lines for the pattern. We check multiple lines because TUI
-//     agents (e.g., Claude Code) render status bars below the input prompt.
-//  2. Process-based fallback: if the pane's current command is a shell,
-//     check whether it has any child processes.
+//     few non-empty lines for the pattern.
+//  2. Process-based fallback: check whether the pane process has children.
 func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 	out, err := tmuxCapturePane(target, 30)
 	if err != nil {
 		return false
 	}
 
-	// Tier 0: response fence detection. When a task was sent with
-	// response_fence enabled, the closing [/termtile-response] tag is
-	// the most reliable "done" signal — it only appears when the agent
-	// has finished and wrapped its final answer.
-	//
-	// However, the fence instruction text itself contains the literal
-	// tags ("...inside [termtile-response] and [/termtile-response] tags...").
-	// We must only match the close tag if it appears AFTER the marker
-	// delimiter, which separates the instruction/task from the response.
-	marker, hasFence := s.getOutputConfig(workspace, slot)
+	// Tier 0: response fence detection via close-tag counting.
+	// Count lines containing [/termtile-response] (but not [termtile-response],
+	// which filters instruction echoes) and compare against the baseline
+	// stored when the task was sent. Close tags are used instead of full
+	// pairs because the opening tag may scroll off the capture window for
+	// long responses, while the close tag stays near the bottom.
+	hasFence, baselineCount := s.getFenceState(workspace, slot)
 	if hasFence {
-		if marker != "" {
-			markerIdx := strings.LastIndex(out, marker)
-			if markerIdx >= 0 && strings.Contains(out[markerIdx:], fenceClose) {
-				return true
-			}
-		} else if strings.Contains(out, fenceClose) {
+		currentCount := countCloseTags(out)
+		if currentCount > baselineCount {
 			return true
 		}
-		// Fence expected but not found — the agent is still working.
+		// Fence expected but no new response yet — the agent is still working.
 		// Do NOT fall through to Tier 1/2 which can false-positive on
 		// startup tips, rate limit prompts, etc. that match the idle pattern.
 		return false
@@ -476,24 +469,24 @@ func containsIdlePattern(text, pattern string) bool {
 	return false
 }
 
-// getOutputConfig returns the task marker and responseFence flag for a tracked slot.
-func (s *Server) getOutputConfig(workspace string, slot int) (taskMarker string, responseFence bool) {
+// getFenceState returns the fence detection state for a tracked slot.
+func (s *Server) getFenceState(workspace string, slot int) (hasFence bool, pairCount int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ws := s.tracked[workspace]
 	if ws == nil {
-		return "", false
+		return false, 0
 	}
 	ta, ok := ws[slot]
 	if !ok {
-		return "", false
+		return false, 0
 	}
-	return ta.taskMarker, ta.responseFence
+	return ta.responseFence, ta.fencePairCount
 }
 
-// updateOutputConfig updates the output parsing config for a tracked slot.
-func (s *Server) updateOutputConfig(workspace string, slot int, taskMarker string, responseFence bool) {
+// updateFenceState updates the fence detection state for a tracked slot.
+func (s *Server) updateFenceState(workspace string, slot int, responseFence bool, pairCount int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -505,8 +498,8 @@ func (s *Server) updateOutputConfig(workspace string, slot int, taskMarker strin
 	if !ok {
 		return
 	}
-	ta.taskMarker = taskMarker
 	ta.responseFence = responseFence
+	ta.fencePairCount = pairCount
 	ws[slot] = ta
 }
 
@@ -574,11 +567,16 @@ func tmuxSendKeys(target, text string) error {
 	return nil
 }
 
-// tmuxCapturePane captures the last N lines from a specific tmux target.
+// tmuxCapturePane captures output from a specific tmux target.
+// If lines > 0, captures the last N lines. If lines <= 0, captures the
+// full scrollback history (using -S -). The -J flag joins wrapped lines
+// so that fence tags split across visual lines are reassembled.
 func tmuxCapturePane(target string, lines int) (string, error) {
-	args := []string{"capture-pane", "-p", "-t", target}
+	args := []string{"capture-pane", "-p", "-J", "-t", target}
 	if lines > 0 {
 		args = append(args, "-S", fmt.Sprintf("-%d", lines))
+	} else {
+		args = append(args, "-S", "-")
 	}
 	cmd := exec.Command("tmux", args...)
 	var stdout, stderr bytes.Buffer

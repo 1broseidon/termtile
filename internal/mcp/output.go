@@ -1,8 +1,6 @@
 package mcp
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"strings"
 	"unicode"
 )
@@ -90,83 +88,174 @@ func wrapTaskWithFence(task string) string {
 	return fenceInstruction + task
 }
 
-// extractFencedResponse extracts content between <termtile-response> tags.
-// Returns the extracted content and true if found, or empty string and false.
-func extractFencedResponse(output string) (string, bool) {
-	openIdx := strings.LastIndex(output, fenceOpen)
-	if openIdx < 0 {
-		return "", false
-	}
-	start := openIdx + len(fenceOpen)
-
-	closeIdx := strings.Index(output[start:], fenceClose)
-	if closeIdx < 0 {
-		// Opening tag found but no closing tag yet — agent may still be writing.
-		return "", false
-	}
-
-	content := output[start : start+closeIdx]
-	return strings.TrimSpace(content), true
+// hasOpenTag returns true if a line contains the open fence tag but NOT the
+// close tag. This filters out instruction echoes where both tags appear on
+// the same line ("...inside [termtile-response] and [/termtile-response] tags...").
+func hasOpenTag(line string) bool {
+	return strings.Contains(line, fenceOpen) && !strings.Contains(line, fenceClose)
 }
 
-// generateMarker creates a unique short marker for an agent task.
-// Format: [agent:xxxxxxxx] where x is random hex (4 bytes = 8 hex chars).
-// At 17 chars total, this never wraps in any TUI and is reliably matchable.
-func generateMarker() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return "[agent:" + hex.EncodeToString(b) + "]"
+// hasCloseTag returns true if a line contains the close fence tag but NOT the
+// open tag. This filters out instruction echoes where both tags appear on
+// the same line.
+func hasCloseTag(line string) bool {
+	return strings.Contains(line, fenceClose) && !strings.Contains(line, fenceOpen)
 }
 
-// appendMarker appends the marker to the task text as a trailing line.
-func appendMarker(task, marker string) string {
-	return task + "\n\n" + marker
-}
-
-// trimOutput applies the best available output trimming strategy:
-//  1. Marker delimiter first (strips startup noise, fence instruction, and task text)
-//  2. Fenced response tags on the remaining text (if response_fence was enabled)
-//  3. Trimmed output (fallback)
+// scanFencePairs finds matched open/close fence tag pairs in the output.
+// Tags can be standalone (on their own line) or inline (with response text
+// on the same line, as codex does). Instruction echoes are filtered out
+// because they contain BOTH tags on a single line with text after the close
+// tag (e.g. "...inside [termtile-response] and [/termtile-response] tags...").
 //
-// The marker runs first because the fence instruction text itself contains
-// the fence tags as literal text ("...inside [termtile-response] and
-// [/termtile-response] tags..."). If the marker isn't found (e.g. scrolled
-// off-screen), we must NOT attempt fence extraction — it would match the
-// instruction's tags and extract the word "and".
-func trimOutput(output, marker string, responseFence bool) string {
-	trimmed, markerFound := trimToAfterMarker(output, marker)
-	if responseFence && markerFound {
-		if fenced, ok := extractFencedResponse(trimmed); ok {
-			return fenced
+// For inline tags, content after the open tag and before the close tag on
+// their respective lines is included in the extracted content.
+func scanFencePairs(output string) []string {
+	lines := strings.Split(output, "\n")
+	var pairs []string
+	for i := 0; i < len(lines); i++ {
+		// Case 1: single-line response — both tags on same line and the
+		// line ends with fenceClose (instruction echoes have text after
+		// the close tag like "tags..." so they don't match).
+		if content, ok := extractSingleLine(lines[i]); ok {
+			if !isInstructionPair(content) {
+				pairs = append(pairs, content)
+			}
+			continue
+		}
+
+		// Case 2: multi-line response — open tag on one line, close on another.
+		if !hasOpenTag(lines[i]) {
+			continue
+		}
+		found := false
+		for j := i + 1; j < len(lines); j++ {
+			if !hasCloseTag(lines[j]) {
+				continue
+			}
+			content := extractBetweenTags(lines, i, j)
+			pairs = append(pairs, content)
+			i = j // outer loop will i++ past the close tag
+			found = true
+			break
+		}
+		if !found {
+			break // unclosed pair — agent still writing
 		}
 	}
-	return trimmed
+	return pairs
 }
 
-// trimToAfterMarker scans the output for the LAST occurrence of the agent
-// marker and returns only the content that follows it, along with whether
-// the marker was found. Uses the last occurrence because the marker appears
-// multiple times in the terminal output: once in the shell command echo
-// and once in the agent TUI's echo. The last one is closest to the actual
-// response and reliably separates the instruction/task from the answer.
-func trimToAfterMarker(output, marker string) (string, bool) {
-	if marker == "" {
-		return output, false
+// extractSingleLine checks if a line contains both fence tags with the close
+// tag at the end of the line (after trimming). Returns the content between
+// the tags and true if matched, or empty string and false otherwise.
+func extractSingleLine(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.Contains(trimmed, fenceOpen) || !strings.HasSuffix(trimmed, fenceClose) {
+		return "", false
 	}
+	openIdx := strings.Index(line, fenceOpen)
+	closeIdx := strings.Index(line, fenceClose)
+	if openIdx >= closeIdx {
+		return "", false
+	}
+	content := strings.TrimSpace(line[openIdx+len(fenceOpen) : closeIdx])
+	return content, true
+}
 
-	lines := strings.Split(output, "\n")
-	lastIdx := -1
-	for i, line := range lines {
-		if strings.Contains(line, marker) {
-			lastIdx = i
+// extractBetweenTags extracts response content from between open and close
+// tag lines, including any text after the open tag and before the close tag
+// on their respective lines (handles both standalone and inline tags).
+func extractBetweenTags(lines []string, openLine, closeLine int) string {
+	var contentLines []string
+
+	// Text after the open tag on its line.
+	if idx := strings.Index(lines[openLine], fenceOpen); idx >= 0 {
+		after := lines[openLine][idx+len(fenceOpen):]
+		if strings.TrimSpace(after) != "" {
+			contentLines = append(contentLines, after)
 		}
 	}
-	if lastIdx < 0 {
-		return output, false
+
+	// Lines between open and close.
+	for k := openLine + 1; k < closeLine; k++ {
+		contentLines = append(contentLines, lines[k])
 	}
 
-	remaining := strings.Join(lines[lastIdx+1:], "\n")
-	return strings.TrimLeft(remaining, "\n"), true
+	// Text before the close tag on its line.
+	if idx := strings.Index(lines[closeLine], fenceClose); idx >= 0 {
+		before := lines[closeLine][:idx]
+		if strings.TrimSpace(before) != "" {
+			contentLines = append(contentLines, before)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(contentLines, "\n"))
+}
+
+// isInstructionPair returns true if the content between fence tags came from
+// the fence instruction text wrapping across lines rather than an actual agent
+// response. This happens on very narrow terminals where the instruction
+// "...inside [termtile-response] and [/termtile-response] tags..." wraps so
+// the tags end up on different lines, producing content "and".
+func isInstructionPair(content string) bool {
+	return strings.TrimSpace(content) == "and"
+}
+
+// countCloseTags counts response close tags in the output. A close tag is
+// counted if either: (1) the line contains fenceClose but not fenceOpen
+// (multi-line response), or (2) both tags are on the same line and the line
+// ends with fenceClose (single-line response, as codex does). Instruction
+// echoes are excluded because they have text after the close tag.
+func countCloseTags(output string) int {
+	lines := strings.Split(output, "\n")
+	count := 0
+	for _, line := range lines {
+		if hasCloseTag(line) {
+			count++
+		} else if content, ok := extractSingleLine(line); ok && !isInstructionPair(content) {
+			count++
+		}
+	}
+	return count
+}
+
+// countResponsePairs counts the number of real (non-instruction) fence pairs
+// in the output.
+func countResponsePairs(output string) int {
+	pairs := scanFencePairs(output)
+	count := 0
+	for _, content := range pairs {
+		if !isInstructionPair(content) {
+			count++
+		}
+	}
+	return count
+}
+
+// lastResponseContent returns the content of the last non-instruction fence
+// pair, or empty string and false if no real response exists.
+func lastResponseContent(output string) (string, bool) {
+	pairs := scanFencePairs(output)
+	for i := len(pairs) - 1; i >= 0; i-- {
+		if !isInstructionPair(pairs[i]) {
+			return pairs[i], true
+		}
+	}
+	return "", false
+}
+
+// trimOutput extracts the agent's response from raw terminal output.
+// For fence-enabled agents, it returns the last real response pair's content.
+// For non-fence agents, it returns the output as-is.
+func trimOutput(output string, responseFence bool) string {
+	if !responseFence {
+		return output
+	}
+	if content, ok := lastResponseContent(output); ok {
+		return content
+	}
+	return output
 }
 
 // stripControlChars removes control characters from a line,

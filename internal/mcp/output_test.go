@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -153,81 +152,210 @@ func TestLastNonEmptyLine(t *testing.T) {
 	}
 }
 
-func TestExtractFencedResponse(t *testing.T) {
+func TestScanFencePairs(t *testing.T) {
 	tests := []struct {
-		name    string
-		output  string
-		want    string
-		wantOK  bool
+		name   string
+		output string
+		want   []string
 	}{
 		{
 			name:   "no fence tags",
 			output: "just some output\nno tags here",
-			want:   "",
-			wantOK: false,
+			want:   nil,
 		},
 		{
-			name:   "opening tag only (still writing)",
+			name:   "standalone opening tag only (still writing)",
 			output: "banner\n[termtile-response]\npartial response...",
+			want:   nil,
+		},
+		{
+			name:   "inline instruction tags are ignored",
+			output: "wrap inside [termtile-response] and [/termtile-response] tags",
+			want:   nil,
+		},
+		{
+			name:   "standalone response pair (inline instruction ignored)",
+			output: "wrap inside [termtile-response] and [/termtile-response] tags\ntask\n[termtile-response]\nThe answer is 42.\n[/termtile-response]\n❯ ",
+			want:   []string{"The answer is 42."},
+		},
+		{
+			name:   "cursor-agent pretty box inline + standalone response",
+			output: "shell> [termtile-response] and [/termtile-response] tags'\n│ [termtile-response] and [/termtile-response] tags │\n[termtile-response]\nReal answer\n[/termtile-response]",
+			want:   []string{"Real answer"},
+		},
+		{
+			name:   "multi-turn: two standalone responses",
+			output: "[termtile-response] and [/termtile-response] tags\n[termtile-response]\nFirst\n[/termtile-response]\n[termtile-response] and [/termtile-response] tags\n[termtile-response]\nSecond\n[/termtile-response]",
+			want:   []string{"First", "Second"},
+		},
+		{
+			name:   "agent discusses fence tags inline — not matched",
+			output: "[termtile-response]\nThe function looks for matched [termtile-response] / [/termtile-response] tag pairs.\n[/termtile-response]",
+			want:   []string{"The function looks for matched [termtile-response] / [/termtile-response] tag pairs."},
+		},
+		{
+			name:   "indented standalone tags",
+			output: "  [termtile-response]\n  The answer is 42.\n  [/termtile-response]",
+			want:   []string{"The answer is 42."},
+		},
+		{
+			name:   "codex inline tags — text on same line as tags",
+			output: "echo [termtile-response] and [/termtile-response] tags\n• [termtile-response]The answer is 42.[/termtile-response]\n› ",
+			want:   []string{"The answer is 42."},
+		},
+		{
+			name:   "codex inline tags — multi-line response",
+			output: "echo [termtile-response] and [/termtile-response] tags\n• [termtile-response]First line.\nSecond line.\nThird line.[/termtile-response]\n› ",
+			want:   []string{"First line.\nSecond line.\nThird line."},
+		},
+		{
+			name:   "codex inline open, standalone close",
+			output: "• [termtile-response]The answer\nis 42.\n[/termtile-response]\n› ",
+			want:   []string{"The answer\nis 42."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scanFencePairs(tt.output)
+			if len(got) != len(tt.want) {
+				t.Fatalf("scanFencePairs() returned %d pairs, want %d\ngot: %v", len(got), len(tt.want), got)
+			}
+			for i, g := range got {
+				if g != tt.want[i] {
+					t.Errorf("pair[%d] = %q, want %q", i, g, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestIsInstructionPair(t *testing.T) {
+	tests := []struct {
+		content string
+		want    bool
+	}{
+		{"and", true},
+		{" and ", true},
+		{"  and  ", true},
+		{"The answer is 42.", false},
+		{"", false},
+		{"and more", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.content, func(t *testing.T) {
+			got := isInstructionPair(tt.content)
+			if got != tt.want {
+				t.Errorf("isInstructionPair(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCountResponsePairs(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{
+			name:   "no pairs",
+			output: "just output",
+			want:   0,
+		},
+		{
+			name:   "inline instruction only",
+			output: "wrap inside [termtile-response] and [/termtile-response] tags",
+			want:   0,
+		},
+		{
+			name:   "inline instruction + standalone response",
+			output: "[termtile-response] and [/termtile-response] tags\n[termtile-response]\nAnswer\n[/termtile-response]",
+			want:   1,
+		},
+		{
+			name:   "multiple inline echoes + standalone response",
+			output: "shell [termtile-response] and [/termtile-response]\nbox [termtile-response] and [/termtile-response]\n[termtile-response]\nAnswer\n[/termtile-response]",
+			want:   1,
+		},
+		{
+			name:   "multi-turn: two standalone responses",
+			output: "[termtile-response] and [/termtile-response]\n[termtile-response]\nFirst\n[/termtile-response]\n[termtile-response] and [/termtile-response]\n[termtile-response]\nSecond\n[/termtile-response]",
+			want:   2,
+		},
+		{
+			name:   "agent still writing (open tag, no close)",
+			output: "[termtile-response] and [/termtile-response] tags\n[termtile-response]\nPartial answer...",
+			want:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := countResponsePairs(tt.output)
+			if got != tt.want {
+				t.Errorf("countResponsePairs() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLastResponseContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "no pairs",
+			output: "just output",
 			want:   "",
 			wantOK: false,
 		},
 		{
-			name:   "complete fenced response",
-			output: "banner\nstartup noise\n[termtile-response]\nThe answer is 42.\n[/termtile-response]\n❯ ",
+			name:   "inline instruction only",
+			output: "[termtile-response] and [/termtile-response] tags",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "standalone response",
+			output: "[termtile-response] and [/termtile-response]\n[termtile-response]\nThe answer is 42.\n[/termtile-response]",
 			want:   "The answer is 42.",
 			wantOK: true,
 		},
 		{
-			name:   "multiple opens uses last one",
-			output: "[termtile-response]\nold\n[/termtile-response]\nnew prompt\n[termtile-response]\nfresh answer\n[/termtile-response]",
-			want:   "fresh answer",
+			name:   "multi-turn returns last response",
+			output: "[termtile-response]\nFirst\n[/termtile-response]\n[termtile-response]\nSecond\n[/termtile-response]",
+			want:   "Second",
 			wantOK: true,
 		},
 		{
-			name:   "multi-line fenced content",
+			name:   "multi-line response",
 			output: "[termtile-response]\nline 1\nline 2\nline 3\n[/termtile-response]",
 			want:   "line 1\nline 2\nline 3",
+			wantOK: true,
+		},
+		{
+			name:   "codex inline tags",
+			output: "echo [termtile-response] and [/termtile-response] tags\n• [termtile-response]The answer is 42.[/termtile-response]\n› ",
+			want:   "The answer is 42.",
 			wantOK: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := extractFencedResponse(tt.output)
+			got, ok := lastResponseContent(tt.output)
 			if ok != tt.wantOK {
-				t.Errorf("extractFencedResponse() ok = %v, want %v", ok, tt.wantOK)
+				t.Errorf("lastResponseContent() ok = %v, want %v", ok, tt.wantOK)
 			}
 			if got != tt.want {
-				t.Errorf("extractFencedResponse() =\n%q\nwant:\n%q", got, tt.want)
+				t.Errorf("lastResponseContent() =\n%q\nwant:\n%q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestGenerateMarker(t *testing.T) {
-	m1 := generateMarker()
-	m2 := generateMarker()
-
-	// Should have the expected format.
-	if !strings.HasPrefix(m1, "[agent:") || !strings.HasSuffix(m1, "]") {
-		t.Errorf("generateMarker() = %q, want [agent:xxxxxxxx] format", m1)
-	}
-	// Should be exactly 16 chars: [agent: (7) + 8 hex + ] (1).
-	if len(m1) != 16 {
-		t.Errorf("generateMarker() length = %d, want 16", len(m1))
-	}
-	// Two markers should be different.
-	if m1 == m2 {
-		t.Errorf("two generateMarker() calls returned same value: %q", m1)
-	}
-}
-
-func TestAppendMarker(t *testing.T) {
-	got := appendMarker("fix the bug", "[agent:deadbeef]")
-	want := "fix the bug\n\n[agent:deadbeef]"
-	if got != want {
-		t.Errorf("appendMarker() = %q, want %q", got, want)
 	}
 }
 
@@ -235,73 +363,110 @@ func TestTrimOutput(t *testing.T) {
 	tests := []struct {
 		name          string
 		output        string
-		marker        string
 		responseFence bool
 		want          string
 	}{
 		{
-			name:          "marker strips prompt then fence extracts response",
-			output:        "banner\nfence instruction...\nfix the bug\n[agent:abc12345]\nI'm fixing it\n[termtile-response]\nFixed!\n[/termtile-response]\n❯ ",
-			marker:        "[agent:abc12345]",
-			responseFence: true,
-			want:          "Fixed!",
-		},
-		{
-			name:          "falls back to marker delimiter when no fence found",
-			output:        "banner\nfix the bug\n[agent:abc12345]\nI fixed the bug.\nDone.",
-			marker:        "[agent:abc12345]",
-			responseFence: true,
-			want:          "I fixed the bug.\nDone.",
-		},
-		{
-			name:          "fence disabled uses marker delimiter only",
-			output:        "banner\n[termtile-response]\nFenced!\n[/termtile-response]\nfix it\n[agent:abc12345]\nresult",
-			marker:        "[agent:abc12345]",
-			responseFence: false,
-			want:          "result",
-		},
-		{
-			name:          "fence tags in instruction are stripped by marker first",
-			output:        "wrap inside [termtile-response] and [/termtile-response] tags\nWhat is 10 + 20\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n❯ ",
-			marker:        "[agent:abc12345]",
-			responseFence: true,
-			want:          "30",
-		},
-		{
-			name:          "empty marker returns full output",
+			name:          "no fence returns output as-is",
 			output:        "banner\nresult",
-			marker:        "",
 			responseFence: false,
 			want:          "banner\nresult",
 		},
 		{
-			name:          "marker not found with fence skips fence extraction (prevents 'and' bug)",
-			output:        "wrap inside [termtile-response] and [/termtile-response] tags\nWhat is 10 + 20\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n❯ ",
-			marker:        "[agent:ffffffff]",
+			name:          "fence extracts last response",
+			output:        "banner\n[termtile-response] and [/termtile-response] tags\ntask\n[termtile-response]\nFixed!\n[/termtile-response]\n❯ ",
 			responseFence: true,
-			want:          "wrap inside [termtile-response] and [/termtile-response] tags\nWhat is 10 + 20\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n❯ ",
+			want:          "Fixed!",
 		},
 		{
-			name:          "instruction fence tags without marker returns raw output not 'and'",
-			output:        "IMPORTANT: wrap inside [termtile-response] and [/termtile-response] tags\nfix the bug",
-			marker:        "[agent:abc12345]",
+			name:          "fence with no response returns full output",
+			output:        "banner\n[termtile-response] and [/termtile-response] tags\ntask text",
 			responseFence: true,
-			want:          "IMPORTANT: wrap inside [termtile-response] and [/termtile-response] tags\nfix the bug",
+			want:          "banner\n[termtile-response] and [/termtile-response] tags\ntask text",
 		},
 		{
-			name:          "duplicate marker with fence instruction in between extracts correct response",
-			output:        "shell> [agent:abc12345]'\nbanner\n[termtile-response] and [/termtile-response] tags\ntask text\n[agent:abc12345]\n[termtile-response]\n30\n[/termtile-response]\n› ",
-			marker:        "[agent:abc12345]",
+			name:          "fence ignores instruction 'and' pair",
+			output:        "wrap inside [termtile-response] and [/termtile-response] tags\nstill working...",
 			responseFence: true,
-			want:          "30",
+			want:          "wrap inside [termtile-response] and [/termtile-response] tags\nstill working...",
+		},
+		{
+			name:          "cursor-agent double instruction echo + response",
+			output:        "shell> [termtile-response] and [/termtile-response]'\n│ [termtile-response] and [/termtile-response] │\n[termtile-response]\nReal answer here\n[/termtile-response]\n→ Add a follow-up",
+			responseFence: true,
+			want:          "Real answer here",
+		},
+		{
+			name:          "codex inline tags extracted",
+			output:        "echo [termtile-response] and [/termtile-response] tags\n• [termtile-response]The answer is 42.[/termtile-response]\n› ",
+			responseFence: true,
+			want:          "The answer is 42.",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := trimOutput(tt.output, tt.marker, tt.responseFence)
+			got := trimOutput(tt.output, tt.responseFence)
 			if got != tt.want {
 				t.Errorf("trimOutput() =\n%q\nwant:\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCountCloseTags(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{
+			name:   "no close tags",
+			output: "just output\nno tags here",
+			want:   0,
+		},
+		{
+			name:   "instruction echo not counted (both tags on line)",
+			output: "wrap inside [termtile-response] and [/termtile-response] tags",
+			want:   0,
+		},
+		{
+			name:   "standalone close tag counted",
+			output: "[termtile-response]\nThe answer.\n[/termtile-response]\n❯ ",
+			want:   1,
+		},
+		{
+			name:   "close tag without open tag still counted",
+			output: "...long response scrolled off...\nfinal line.\n[/termtile-response]\n❯ ",
+			want:   1,
+		},
+		{
+			name:   "two close tags",
+			output: "[termtile-response]\nFirst\n[/termtile-response]\n[termtile-response]\nSecond\n[/termtile-response]",
+			want:   2,
+		},
+		{
+			name:   "codex inline close tag counted",
+			output: "• [termtile-response]The answer is 42.[/termtile-response]\n› ",
+			want:   1,
+		},
+		{
+			name:   "codex inline close — end of line",
+			output: "Third line.[/termtile-response]\n› ",
+			want:   1,
+		},
+		{
+			name:   "instruction echo wrapping — line ends with close tag but content is 'and'",
+			output: "d, wrap ONLY your final answer inside [termtile-response] and [/termtile-response]\n tags.",
+			want:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := countCloseTags(tt.output)
+			if got != tt.want {
+				t.Errorf("countCloseTags() = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -310,83 +475,12 @@ func TestTrimOutput(t *testing.T) {
 func TestWrapTaskWithFence(t *testing.T) {
 	task := "fix the auth bug"
 	got := wrapTaskWithFence(task)
-	if !strings.Contains(got, task) {
-		t.Error("wrapped task should contain original task")
+	if got == task {
+		t.Error("wrapped task should differ from original task")
 	}
-	if !strings.Contains(got, "[termtile-response]") {
-		t.Error("wrapped task should mention fence tags")
-	}
-}
-
-func TestTrimToAfterMarker(t *testing.T) {
-	tests := []struct {
-		name      string
-		output    string
-		marker    string
-		want      string
-		wantFound bool
-	}{
-		{
-			name:      "empty marker returns full output",
-			output:    "banner\nstuff\nresult",
-			marker:    "",
-			want:      "banner\nstuff\nresult",
-			wantFound: false,
-		},
-		{
-			name:      "no match returns full output",
-			output:    "banner\nstuff\nresult",
-			marker:    "[agent:ffffffff]",
-			want:      "banner\nstuff\nresult",
-			wantFound: false,
-		},
-		{
-			name:      "trims everything before and including marker line",
-			output:    "Welcome to Claude!\nTips: ...\nfix the auth bug\n[agent:abc12345]\nI'll fix the auth bug now.\nDone.",
-			marker:    "[agent:abc12345]",
-			want:      "I'll fix the auth bug now.\nDone.",
-			wantFound: true,
-		},
-		{
-			name:      "marker at end leaves empty output",
-			output:    "banner\n[agent:abc12345]",
-			marker:    "[agent:abc12345]",
-			want:      "",
-			wantFound: true,
-		},
-		{
-			name:      "strips leading newlines from result",
-			output:    "banner\n[agent:abc12345]\n\n\nresponse",
-			marker:    "[agent:abc12345]",
-			want:      "response",
-			wantFound: true,
-		},
-		{
-			name:      "marker embedded in line with other text",
-			output:    "banner\n> [agent:abc12345]\nresponse here",
-			marker:    "[agent:abc12345]",
-			want:      "response here",
-			wantFound: true,
-		},
-		{
-			name:      "duplicate markers uses last occurrence (shell echo + TUI echo)",
-			output:    "shell> [agent:abc12345]'\nbanner\ninstruction noise\n  [agent:abc12345]\nactual response",
-			marker:    "[agent:abc12345]",
-			want:      "actual response",
-			wantFound: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, found := trimToAfterMarker(tt.output, tt.marker)
-			if got != tt.want {
-				t.Errorf("trimToAfterMarker() =\n%q\nwant:\n%q", got, tt.want)
-			}
-			if found != tt.wantFound {
-				t.Errorf("trimToAfterMarker() found = %v, want %v", found, tt.wantFound)
-			}
-		})
+	// Should contain the fence instruction and the original task.
+	if len(got) <= len(task) {
+		t.Error("wrapped task should be longer than original")
 	}
 }
 

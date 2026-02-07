@@ -80,13 +80,13 @@ func TestPeekNextSlot(t *testing.T) {
 	}
 
 	// After allocating, peek should return next.
-	s.allocateSlot("test-ws", "claude", "%5", "pane", "", false)
+	s.allocateSlot("test-ws", "claude", "%5", "pane", false)
 	if got := s.peekNextSlot("test-ws"); got != 1 {
 		t.Errorf("peekNextSlot after allocate = %d, want 1", got)
 	}
 
 	// Allocate in window mode.
-	s.allocateSlot("test-ws", "codex", "termtile-test-ws-1:0.0", "window", "", false)
+	s.allocateSlot("test-ws", "codex", "termtile-test-ws-1:0.0", "window", false)
 	if got := s.peekNextSlot("test-ws"); got != 2 {
 		t.Errorf("peekNextSlot after window allocate = %d, want 2", got)
 	}
@@ -99,8 +99,8 @@ func TestGetSpawnMode(t *testing.T) {
 		nextSlot: make(map[string]int),
 	}
 
-	s.allocateSlot("ws", "claude", "%5", "pane", "", false)
-	s.allocateSlot("ws", "codex", "termtile-ws-1:0.0", "window", "", false)
+	s.allocateSlot("ws", "claude", "%5", "pane", false)
+	s.allocateSlot("ws", "codex", "termtile-ws-1:0.0", "window", false)
 
 	if got := s.getSpawnMode("ws", 0); got != "pane" {
 		t.Errorf("slot 0 spawn mode = %q, want %q", got, "pane")
@@ -116,28 +116,28 @@ func TestGetSpawnMode(t *testing.T) {
 	}
 }
 
-func TestUpdateOutputConfig(t *testing.T) {
+func TestUpdateFenceState(t *testing.T) {
 	s := &Server{
 		config:   config.DefaultConfig(),
 		tracked:  make(map[string]map[int]trackedAgent),
 		nextSlot: make(map[string]int),
 	}
 
-	slot := s.allocateSlot("ws", "claude", "%5", "pane", "old-marker", false)
-	s.updateOutputConfig("ws", slot, "new-marker", true)
+	slot := s.allocateSlot("ws", "claude", "%5", "pane", false)
+	s.updateFenceState("ws", slot, true, 3)
 
-	marker, fence := s.getOutputConfig("ws", slot)
-	if marker != "new-marker" {
-		t.Fatalf("marker = %q, want %q", marker, "new-marker")
-	}
+	fence, count := s.getFenceState("ws", slot)
 	if !fence {
 		t.Fatal("responseFence = false, want true")
 	}
+	if count != 3 {
+		t.Fatalf("fencePairCount = %d, want 3", count)
+	}
 
 	// Non-existent slot should be a no-op.
-	s.updateOutputConfig("ws", 999, "ignored", false)
-	if marker2, _ := s.getOutputConfig("ws", slot); marker2 != "new-marker" {
-		t.Fatalf("marker after no-op update = %q, want %q", marker2, "new-marker")
+	s.updateFenceState("ws", 999, false, 0)
+	if fence2, count2 := s.getFenceState("ws", slot); !fence2 || count2 != 3 {
+		t.Fatalf("after no-op update: fence=%v count=%d, want true/3", fence2, count2)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestUpdateTmuxTarget(t *testing.T) {
 		nextSlot: make(map[string]int),
 	}
 
-	slot := s.allocateSlot("ws", "claude", "", "window", "", false)
+	slot := s.allocateSlot("ws", "claude", "", "window", false)
 	s.updateTmuxTarget("ws", slot, "termtile-ws-0:0.0")
 
 	target, ok := s.getTmuxTarget("ws", slot)
@@ -204,9 +204,6 @@ func TestReconcile(t *testing.T) {
 		}
 		if ta.spawnMode != "window" {
 			t.Fatalf("spawnMode = %q, want %q", ta.spawnMode, "window")
-		}
-		if ta.taskMarker != "" {
-			t.Fatalf("taskMarker = %q, want empty", ta.taskMarker)
 		}
 		if ta.responseFence {
 			t.Fatalf("responseFence = %v, want false", ta.responseFence)
