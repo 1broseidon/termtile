@@ -57,13 +57,6 @@ columns:
           - config
           - terminal
           - phase-2
-      - id: task-94
-        title: "Test issue: brainfile sync validation"
-        description: Temporary test task to validate the brainfile-to-GitHub-Issues sync pipeline. Should appear as an open issue, then close when moved to done.
-        priority: low
-        tags:
-          - test
-          - ci
   - id: in-progress
     title: In Progress
     tasks: []
@@ -279,6 +272,13 @@ columns:
           - id: task-93-6
             title: Convert mp4 to 2x speed gif (1720px wide)
             completed: true
+      - id: task-94
+        title: "Test issue: brainfile sync validation"
+        description: Temporary test task to validate the brainfile-to-GitHub-Issues sync pipeline. Should appear as an open issue, then close when moved to done.
+        priority: low
+        tags:
+          - test
+          - ci
   - id: backlog
     title: Backlog
     tasks:
