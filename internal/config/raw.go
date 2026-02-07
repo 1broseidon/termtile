@@ -284,8 +284,21 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 		}
 		for name, agent := range overlay.Agents {
 			if base, ok := out.Agents[name]; ok {
-				// Keep existing agent replacement behavior, but carry forward
-				// model-related fields when the overlay omits them.
+				// Carry forward base fields when the overlay omits them.
+				// This lets users partially override an agent (e.g. just
+				// change args) without losing idle_pattern, response_fence, etc.
+				if agent.IdlePattern == "" {
+					agent.IdlePattern = base.IdlePattern
+				}
+				if !agent.ResponseFence {
+					agent.ResponseFence = base.ResponseFence
+				}
+				if agent.SpawnMode == "" {
+					agent.SpawnMode = base.SpawnMode
+				}
+				if agent.ReadyPattern == "" {
+					agent.ReadyPattern = base.ReadyPattern
+				}
 				if len(agent.Models) == 0 {
 					agent.Models = base.Models
 				}

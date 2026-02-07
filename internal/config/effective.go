@@ -153,6 +153,30 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 			cfg.Agents = make(map[string]AgentConfig, len(raw.Agents))
 		}
 		for name, agentCfg := range raw.Agents {
+			if base, ok := cfg.Agents[name]; ok {
+				// Merge: carry forward default fields the user didn't set.
+				if agentCfg.IdlePattern == "" {
+					agentCfg.IdlePattern = base.IdlePattern
+				}
+				if !agentCfg.ResponseFence {
+					agentCfg.ResponseFence = base.ResponseFence
+				}
+				if agentCfg.SpawnMode == "" {
+					agentCfg.SpawnMode = base.SpawnMode
+				}
+				if agentCfg.ReadyPattern == "" {
+					agentCfg.ReadyPattern = base.ReadyPattern
+				}
+				if len(agentCfg.Models) == 0 {
+					agentCfg.Models = base.Models
+				}
+				if agentCfg.DefaultModel == "" {
+					agentCfg.DefaultModel = base.DefaultModel
+				}
+				if agentCfg.ModelFlag == "" {
+					agentCfg.ModelFlag = base.ModelFlag
+				}
+			}
 			cfg.Agents[name] = agentCfg
 		}
 	}
