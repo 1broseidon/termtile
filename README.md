@@ -2,6 +2,8 @@
 
 A terminal window tiling manager and agent orchestrator for Linux/X11.
 
+![termtile agent orchestration demo](termtile-demo-github.gif)
+
 termtile automatically arranges your terminal emulator windows into clean, grid-based layouts. It combines robust window management with workspace persistence and a Model Context Protocol (MCP) server for orchestrating AI coding agents.
 
 ## Key Features
@@ -12,11 +14,6 @@ termtile automatically arranges your terminal emulator windows into clean, grid-
 - **Agent Orchestration**: A built-in MCP server designed for AI-native workflows. Spawn, monitor, and pipe data to AI agents (Claude, Aider, etc.) directly in your tiled terminals.
 - **Desktop Native**: Built specifically for X11 with EWMH compliance. Integrates with systemd for daemon management and supports external launchers like `rofi`, `dmenu`, or `wofi` for command palettes.
 - **Interactive TUI**: A terminal UI for browsing, previewing, and selecting layouts without needing to remember complex command flags.
-
-## Demo
-
-![termtile demo](master-stack-demo.gif)
-*Example: Tiling multiple terminals into a dynamic grid layout.*
 
 ## Quick Install
 
