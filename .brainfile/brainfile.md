@@ -57,53 +57,6 @@ columns:
           - config
           - terminal
           - phase-2
-      - id: task-99
-        title: "Super+Alt+R selector refactor: discover, fix, and deploy"
-        description: Current Super+Alt+R selector UX is inconsistent and visually incorrect (outline sizing mismatch, overlay menu visibility issues, and phase-dependent rendering glitches). Run a focused discovery to identify root causes, then define an implementation and rollout plan that restores predictable behavior and consistent visuals.
-        priority: high
-        tags:
-          - shortcuts
-          - movemode
-          - overlay
-          - ux
-          - refactor
-        relatedFiles:
-          - internal/movemode/movemode.go
-          - internal/movemode/overlay.go
-          - internal/movemode/state.go
-          - docs/daemon.md
-          - docs/configuration.md
-        subtasks:
-          - id: task-99-1
-            title: Reproduce current selector UX issues and catalog exact failure modes
-            completed: false
-          - id: task-99-2
-            title: Trace root causes in move-mode state, overlay rendering, and border geometry logic
-            completed: false
-          - id: task-99-3
-            title: Propose refactor architecture and phased rollout plan
-            completed: false
-          - id: task-99-4
-            title: Define implementation tasks/contracts for parallel delegation
-            completed: false
-        contract:
-          status: ready
-          deliverables:
-            - type: file
-              path: .brainfile/plans/super-alt-r-selector-refactor-discovery.md
-              description: Discovery report with reproducible issues, root causes, and refactor blueprint
-            - type: file
-              path: .brainfile/plans/super-alt-r-selector-refactor-discovery.md
-              description: Task breakdown for follow-on implementation/deploy contracts
-          validation:
-            commands:
-              - test -f .brainfile/plans/super-alt-r-selector-refactor-discovery.md
-          constraints:
-            - "Discovery-first pass: do not modify production code in this task"
-            - Report must include exact file/function touch points for each root cause
-            - Include rollout/testing strategy to validate visual parity and interaction correctness
-            - Output summary must be consumable for immediate parallel task delegation
-        assignee: ""
   - id: in-progress
     title: In Progress
     tasks: []
@@ -719,6 +672,57 @@ columns:
           - .github/scripts/brainfile-sync.sh
           - .github/workflows/brainfile-sync.yml
           - Makefile
+      - id: task-99
+        title: "Super+Alt+R selector refactor: discover, fix, and deploy"
+        description: Current Super+Alt+R selector UX is inconsistent and visually incorrect (outline sizing mismatch, overlay menu visibility issues, and phase-dependent rendering glitches). Run a focused discovery to identify root causes, then define an implementation and rollout plan that restores predictable behavior and consistent visuals.
+        priority: high
+        tags:
+          - shortcuts
+          - movemode
+          - overlay
+          - ux
+          - refactor
+        relatedFiles:
+          - internal/movemode/movemode.go
+          - internal/movemode/overlay.go
+          - internal/movemode/state.go
+          - docs/daemon.md
+          - docs/configuration.md
+        subtasks:
+          - id: task-99-1
+            title: Reproduce current selector UX issues and catalog exact failure modes
+            completed: true
+          - id: task-99-2
+            title: Trace root causes in move-mode state, overlay rendering, and border geometry logic
+            completed: true
+          - id: task-99-3
+            title: Propose refactor architecture and phased rollout plan
+            completed: true
+          - id: task-99-4
+            title: Define implementation tasks/contracts for parallel delegation
+            completed: true
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/movemode/movemode.go
+              description: Normalize move-mode render model and geometry pipeline for consistent overlays
+            - type: file
+              path: internal/movemode/overlay.go
+              description: Stabilize hint overlay sizing/placement and phase-accurate legend content
+            - type: test
+              path: internal/movemode/overlay_test.go
+              description: Add regression tests for hint placement/clamping and phase legend behavior
+          validation:
+            commands:
+              - go test ./internal/movemode/...
+              - go test ./...
+          constraints:
+            - Keep existing move/confirm key behavior backward-compatible
+            - Overlay/hint refactor must not break keyboard grab lifecycle
+            - Use a single geometry contract for terminal and slot preview overlays
+            - Hint legend must match implemented actions (d/n/a in select phase)
+        assignee: codex
   - id: backlog
     title: Backlog
     tasks:

@@ -61,6 +61,18 @@ type MoveResult struct {
 	IsSwap bool
 }
 
+type overlayHighlight struct {
+	Rect  tiling.Rect
+	Color uint32
+}
+
+type overlayRenderModel struct {
+	TerminalHighlights []overlayHighlight
+	SlotHighlights     []overlayHighlight
+	AllSlotRects       []tiling.Rect
+	HintPhase          HintPhase
+}
+
 // OnMoveCompleteFunc is called after a move operation completes.
 // It receives the move result for post-processing (e.g., renaming tmux sessions).
 type OnMoveCompleteFunc func(result MoveResult)
@@ -437,85 +449,132 @@ func (m *Mode) updateOverlays() {
 		return
 	}
 
-	var terminalRects []tiling.Rect
-	var terminalColors []uint32
-	var slotRects []tiling.Rect
-	var slotColors []uint32
-	hintPhase := HintPhaseNone
-
-	switch m.state.Phase {
-	case PhaseSelecting:
-		hintPhase = HintPhaseSelecting
-		term := m.state.SelectedTerminal()
-		if term == nil {
-			m.overlay.HideAll()
-			return
-		}
-		rect, ok := m.getVisibleWindowRect(term.Window.WindowID)
-		if !ok {
-			rect = tiling.Rect{X: term.Window.X, Y: term.Window.Y, Width: term.Window.Width, Height: term.Window.Height}
-		}
-		terminalRects = []tiling.Rect{rect}
-		terminalColors = []uint32{uint32(ColorSelection)}
-
-	case PhaseConfirmDelete:
-		hintPhase = HintPhaseConfirmDelete
-		term := m.state.SelectedTerminal()
-		if term == nil {
-			m.overlay.HideAll()
-			return
-		}
-		rect, ok := m.getVisibleWindowRect(term.Window.WindowID)
-		if !ok {
-			rect = tiling.Rect{X: term.Window.X, Y: term.Window.Y, Width: term.Window.Width, Height: term.Window.Height}
-		}
-		terminalRects = []tiling.Rect{rect}
-		terminalColors = []uint32{uint32(ColorTarget)}
-
-	case PhaseGrabbed:
-		hintPhase = HintPhaseMove
-		grabbedTerm := TerminalSlot{}
-		foundGrabbed := false
-		for _, t := range m.state.Terminals {
-			if t.Window.WindowID == m.state.GrabbedWindow {
-				grabbedTerm = t
-				foundGrabbed = true
-				break
-			}
-		}
-		if foundGrabbed {
-			rect, ok := m.getVisibleWindowRect(grabbedTerm.Window.WindowID)
-			if !ok {
-				rect = tiling.Rect{X: grabbedTerm.Window.X, Y: grabbedTerm.Window.Y, Width: grabbedTerm.Window.Width, Height: grabbedTerm.Window.Height}
-			}
-			terminalRects = []tiling.Rect{rect}
-			terminalColors = []uint32{uint32(ColorGrabbed)}
-		}
-
-		targetSlot := m.state.TargetSlotRect()
-		if targetSlot != nil {
-			slotRects = []tiling.Rect{*targetSlot}
-			slotColors = []uint32{uint32(ColorSelection)}
-		}
+	model, ok := m.buildRenderModel()
+	if !ok {
+		m.overlay.HideAll()
+		return
 	}
 
-	if err := m.overlay.Render(terminalRects, terminalColors, slotRects, slotColors, m.state.SlotPositions, hintPhase); err != nil {
+	terminalRects, terminalColors := splitOverlayHighlights(model.TerminalHighlights)
+	slotRects, slotColors := splitOverlayHighlights(model.SlotHighlights)
+
+	if err := m.overlay.Render(terminalRects, terminalColors, slotRects, slotColors, model.AllSlotRects, model.HintPhase); err != nil {
 		log.Printf("Move mode: overlay render failed: %v", err)
 	}
 }
 
-func (m *Mode) getVisibleWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
-	outer, ok := m.getOutermostWindowRect(windowID)
-	if ok {
-		return outer, true
+func splitOverlayHighlights(highlights []overlayHighlight) ([]tiling.Rect, []uint32) {
+	rects := make([]tiling.Rect, 0, len(highlights))
+	colors := make([]uint32, 0, len(highlights))
+	for _, h := range highlights {
+		rects = append(rects, h.Rect)
+		colors = append(colors, h.Color)
+	}
+	return rects, colors
+}
+
+func (m *Mode) buildRenderModel() (overlayRenderModel, bool) {
+	model := overlayRenderModel{
+		AllSlotRects: append([]tiling.Rect(nil), m.state.SlotPositions...),
+		HintPhase:    HintPhaseNone,
 	}
 
-	// Fallback: use client geometry.
-	client, ok := m.getClientWindowRect(windowID)
-	return client, ok
+	switch m.state.Phase {
+	case PhaseSelecting:
+		model.HintPhase = HintPhaseSelecting
+		term := m.state.SelectedTerminal()
+		if term == nil {
+			return overlayRenderModel{}, false
+		}
+		model.TerminalHighlights = append(model.TerminalHighlights, overlayHighlight{
+			Rect:  m.resolveTerminalRect(*term),
+			Color: uint32(ColorSelection),
+		})
+
+	case PhaseConfirmDelete:
+		model.HintPhase = HintPhaseConfirmDelete
+		term := m.state.SelectedTerminal()
+		if term == nil {
+			return overlayRenderModel{}, false
+		}
+		model.TerminalHighlights = append(model.TerminalHighlights, overlayHighlight{
+			Rect:  m.resolveTerminalRect(*term),
+			Color: uint32(ColorTarget),
+		})
+
+	case PhaseGrabbed:
+		model.HintPhase = HintPhaseMove
+		grabbedTerm, foundGrabbed := m.findGrabbedTerminal()
+		if foundGrabbed {
+			model.TerminalHighlights = append(model.TerminalHighlights, overlayHighlight{
+				Rect:  m.resolveTerminalRect(grabbedTerm),
+				Color: uint32(ColorGrabbed),
+			})
+		}
+
+		targetSlot := m.state.TargetSlotRect()
+		if targetSlot != nil {
+			class := ""
+			if foundGrabbed {
+				class = grabbedTerm.Window.Class
+			}
+			model.SlotHighlights = append(model.SlotHighlights, overlayHighlight{
+				Rect:  m.normalizeSlotPreviewRect(*targetSlot, class),
+				Color: uint32(ColorSelection),
+			})
+		}
+	}
+
+	return model, true
+}
+
+func (m *Mode) findGrabbedTerminal() (TerminalSlot, bool) {
+	for _, term := range m.state.Terminals {
+		if term.Window.WindowID == m.state.GrabbedWindow {
+			return term, true
+		}
+	}
+	return TerminalSlot{}, false
+}
+
+func (m *Mode) resolveTerminalRect(term TerminalSlot) tiling.Rect {
+	if liveRect, ok := m.getClientWindowRect(term.Window.WindowID); ok {
+		return liveRect
+	}
+	return tiling.Rect{
+		X:      term.Window.X,
+		Y:      term.Window.Y,
+		Width:  term.Window.Width,
+		Height: term.Window.Height,
+	}
+}
+
+func (m *Mode) normalizeSlotPreviewRect(slot tiling.Rect, terminalClass string) tiling.Rect {
+	preview := slot
+
+	if terminalClass != "" {
+		margins := m.config.GetMargins(terminalClass)
+		preview.X += margins.Left
+		preview.Y += margins.Top
+		preview.Width -= margins.Left + margins.Right
+		preview.Height -= margins.Top + margins.Bottom
+	}
+
+	if preview.Width < 1 {
+		preview.Width = 1
+	}
+	if preview.Height < 1 {
+		preview.Height = 1
+	}
+
+	return preview
 }
 
 func (m *Mode) getClientWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
+	if m.xu == nil {
+		return tiling.Rect{}, false
+	}
+
 	conn := m.xu.Conn()
 	xpWin := xproto.Window(windowID)
 
@@ -527,46 +586,6 @@ func (m *Mode) getClientWindowRect(windowID platform.WindowID) (tiling.Rect, boo
 	translate, err := xproto.TranslateCoordinates(
 		conn,
 		xpWin,
-		m.root,
-		0, 0,
-	).Reply()
-	if err != nil {
-		return tiling.Rect{}, false
-	}
-
-	return tiling.Rect{
-		X:      int(translate.DstX),
-		Y:      int(translate.DstY),
-		Width:  int(geom.Width),
-		Height: int(geom.Height),
-	}, true
-}
-
-func (m *Mode) getOutermostWindowRect(windowID platform.WindowID) (tiling.Rect, bool) {
-	conn := m.xu.Conn()
-	xpWin := xproto.Window(windowID)
-
-	current := xpWin
-	outer := xpWin
-	for depth := 0; depth < 16; depth++ {
-		tree, err := xproto.QueryTree(conn, current).Reply()
-		if err != nil {
-			break
-		}
-		if tree.Parent == 0 || tree.Parent == m.root {
-			break
-		}
-		outer = tree.Parent
-		current = tree.Parent
-	}
-
-	geom, err := xproto.GetGeometry(conn, xproto.Drawable(outer)).Reply()
-	if err != nil {
-		return tiling.Rect{}, false
-	}
-	translate, err := xproto.TranslateCoordinates(
-		conn,
-		outer,
 		m.root,
 		0, 0,
 	).Reply()

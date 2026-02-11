@@ -339,6 +339,7 @@ func (m *OverlayManager) renderHint(phase HintPhase, allSlotRects []tiling.Rect,
 	}
 
 	if !m.ensureHintResources() {
+		m.hideHint()
 		return
 	}
 
@@ -353,19 +354,33 @@ func (m *OverlayManager) renderHint(phase HintPhase, allSlotRects []tiling.Rect,
 	}
 
 	maxWidth := bounds.Width - 2*hintMargin
-	if maxWidth < hintMinWidth {
-		maxWidth = hintMinWidth
+	if maxWidth < 1 {
+		maxWidth = bounds.Width
+	}
+	if maxWidth < 1 {
+		m.hideHint()
+		return
 	}
 	if width > maxWidth {
 		width = maxWidth
 	}
+	if width < 1 {
+		width = 1
+	}
 
 	maxHeight := bounds.Height - 2*hintMargin
-	if maxHeight < hintLineHeight+2*hintPaddingY {
-		maxHeight = hintLineHeight + 2*hintPaddingY
+	if maxHeight < 1 {
+		maxHeight = bounds.Height
+	}
+	if maxHeight < 1 {
+		m.hideHint()
+		return
 	}
 	if height > maxHeight {
 		height = maxHeight
+	}
+	if height < 1 {
+		height = 1
 	}
 
 	x, y := chooseHintPosition(bounds, avoidRects, width, height)
@@ -541,6 +556,9 @@ func hintLinesForPhase(phase HintPhase) []string {
 			"Move Mode: select terminal",
 			"Arrows  cycle terminals",
 			"Enter   grab selected",
+			"d       delete selected",
+			"n       add after selected",
+			"a       append terminal",
 			"Esc     cancel",
 		}
 	case HintPhaseMove:
@@ -628,12 +646,49 @@ func chooseHintPosition(bounds tiling.Rect, avoidRects []tiling.Rect, width, hei
 			}
 		}
 		if !obscuresSelection {
-			return candidate.X, candidate.Y
+			return clampHintOrigin(candidate.X, candidate.Y, bounds, width, height)
 		}
 	}
 
 	// Fallback if all corners overlap the selected/grabbed terminal.
-	return candidates[0].X, candidates[0].Y
+	return clampHintOrigin(candidates[0].X, candidates[0].Y, bounds, width, height)
+}
+
+func clampHintOrigin(x, y int, bounds tiling.Rect, width, height int) (int, int) {
+	left := bounds.X + hintMargin
+	right := bounds.X + bounds.Width - hintMargin - width
+	if right < left {
+		left = bounds.X
+		right = bounds.X + bounds.Width - width
+	}
+	if right < left {
+		right = left
+	}
+
+	top := bounds.Y + hintMargin
+	bottom := bounds.Y + bounds.Height - hintMargin - height
+	if bottom < top {
+		top = bounds.Y
+		bottom = bounds.Y + bounds.Height - height
+	}
+	if bottom < top {
+		bottom = top
+	}
+
+	if x < left {
+		x = left
+	}
+	if x > right {
+		x = right
+	}
+	if y < top {
+		y = top
+	}
+	if y > bottom {
+		y = bottom
+	}
+
+	return x, y
 }
 
 func unionRect(rects []tiling.Rect) (tiling.Rect, bool) {
