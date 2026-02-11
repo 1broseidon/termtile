@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/1broseidon/termtile/internal/platform"
+	"github.com/1broseidon/termtile/internal/runtimepath"
 )
 
 // WorkspaceInfo holds information about an active workspace on a specific desktop.
@@ -31,20 +31,13 @@ type SlotInfo struct {
 
 // workspaceRegistry tracks all active workspaces keyed by desktop number.
 type workspaceRegistry struct {
-	Workspaces map[int]WorkspaceInfo  `json:"workspaces"`
-	Slots      map[uint32]SlotInfo    `json:"slots,omitempty"` // WindowID -> SlotInfo
+	Workspaces map[int]WorkspaceInfo `json:"workspaces"`
+	Slots      map[uint32]SlotInfo   `json:"slots,omitempty"` // WindowID -> SlotInfo
 }
 
 // statePath returns the path to the workspace registry state file.
 func statePath() (string, error) {
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = fmt.Sprintf("/tmp/termtile-runtime-%d", os.Getuid())
-	}
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create runtime dir: %w", err)
-	}
-	return filepath.Join(runtimeDir, "termtile-workspace.json"), nil
+	return runtimepath.WorkspaceRegistryPath()
 }
 
 // loadRegistry loads the workspace registry from disk.
@@ -243,6 +236,55 @@ func ClearWorkspace(desktop int) error {
 // This is a convenience wrapper for ClearWorkspace(-1).
 func ClearActiveWorkspace() error {
 	return ClearWorkspace(-1)
+}
+
+// MoveTerminalBetweenWorkspaces moves a terminal slot from one workspace to another.
+// It removes the slot from the source workspace, appends it to the destination,
+// and returns the new slot index in the destination workspace.
+func MoveTerminalBetweenWorkspaces(srcDesktop, srcSlot, dstDesktop int) (newSlot int, err error) {
+	registry, err := loadRegistry()
+	if err != nil {
+		return -1, err
+	}
+
+	srcWs, ok := registry.Workspaces[srcDesktop]
+	if !ok {
+		return -1, fmt.Errorf("no workspace on source desktop %d", srcDesktop)
+	}
+	dstWs, ok := registry.Workspaces[dstDesktop]
+	if !ok {
+		return -1, fmt.Errorf("no workspace on destination desktop %d", dstDesktop)
+	}
+
+	if srcSlot < 0 || srcSlot >= srcWs.TerminalCount {
+		return -1, fmt.Errorf("slot %d out of range (source workspace has %d terminals)", srcSlot, srcWs.TerminalCount)
+	}
+
+	// Remove from source: decrement count, remove slot, shift down
+	srcWs.TerminalCount--
+	newSrcSlots := make([]int, 0, len(srcWs.AgentSlots))
+	for _, s := range srcWs.AgentSlots {
+		if s < srcSlot {
+			newSrcSlots = append(newSrcSlots, s)
+		} else if s > srcSlot {
+			newSrcSlots = append(newSrcSlots, s-1)
+		}
+	}
+	srcWs.AgentSlots = newSrcSlots
+
+	// Add to destination: append new slot
+	newSlot = dstWs.TerminalCount
+	dstWs.TerminalCount++
+	dstWs.AgentSlots = append(dstWs.AgentSlots, newSlot)
+	sort.Ints(dstWs.AgentSlots)
+
+	registry.Workspaces[srcDesktop] = srcWs
+	registry.Workspaces[dstDesktop] = dstWs
+	if err := saveRegistry(registry); err != nil {
+		return -1, err
+	}
+
+	return newSlot, nil
 }
 
 // RemoveTerminalFromWorkspace removes a slot from the workspace.

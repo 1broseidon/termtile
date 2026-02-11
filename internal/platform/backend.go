@@ -36,5 +36,6 @@ type Backend interface {
 	ListWindowsOnDisplay(displayID int) ([]Window, error)
 	MoveResize(windowID WindowID, bounds Rect) error
 	Minimize(windowID WindowID) error
+	Focus(windowID WindowID) error
 	Close(windowID WindowID) error
 }

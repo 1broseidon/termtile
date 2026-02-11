@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/1broseidon/termtile/internal/runtimepath"
 )
 
 // Client handles IPC communication with the daemon
@@ -18,13 +18,11 @@ type Client struct {
 
 // NewClient creates a new IPC client
 func NewClient() *Client {
-	uid := os.Getuid()
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = fmt.Sprintf("/tmp/termtile-runtime-%d", uid)
+	socketPath, err := runtimepath.SocketPath()
+	if err != nil {
+		// Keep constructor non-failing; sendRequest surfaces connection errors.
+		socketPath = ""
 	}
-
-	socketPath := filepath.Join(runtimeDir, "termtile.sock")
 
 	return &Client{
 		socketPath: socketPath,

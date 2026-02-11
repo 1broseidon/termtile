@@ -5,6 +5,26 @@ import (
 	"unicode"
 )
 
+const (
+	// defaultReadLines is used when read_from_agent does not pass a lines value.
+	defaultReadLines = 50
+	// maxReadLines prevents very large read_from_agent payloads from blowing up context.
+	maxReadLines = 100
+	// fenceReadCaptureLines expands capture window for fenced responses without using full scrollback.
+	fenceReadCaptureLines = 400
+)
+
+// normalizeReadLines returns a bounded read line count for read_from_agent.
+func normalizeReadLines(lines int) int {
+	if lines <= 0 {
+		return defaultReadLines
+	}
+	if lines > maxReadLines {
+		return maxReadLines
+	}
+	return lines
+}
+
 // cleanOutput processes raw tmux capture-pane text by removing TUI chrome,
 // collapsing excessive blank lines, and trimming leading/trailing whitespace.
 // tmux capture-pane -p already strips ANSI escapes, so no regex stripping needed.
@@ -269,4 +289,51 @@ func stripControlChars(line string) string {
 		}
 	}
 	return b.String()
+}
+
+// tailOutputLines returns at most the last maxLines lines from text.
+func tailOutputLines(text string, maxLines int) string {
+	if maxLines <= 0 || strings.TrimSpace(text) == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= maxLines {
+		return text
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
+// outputDelta returns only the new suffix content from current compared to previous.
+// It performs line-based overlap matching to handle scrolling terminal buffers.
+func outputDelta(previous, current string) string {
+	if previous == "" {
+		return current
+	}
+	if previous == current {
+		return ""
+	}
+	prevLines := strings.Split(previous, "\n")
+	currLines := strings.Split(current, "\n")
+	maxOverlap := len(prevLines)
+	if len(currLines) < maxOverlap {
+		maxOverlap = len(currLines)
+	}
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		if equalLineSlices(prevLines[len(prevLines)-overlap:], currLines[:overlap]) {
+			return strings.Join(currLines[overlap:], "\n")
+		}
+	}
+	return current
+}
+
+func equalLineSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

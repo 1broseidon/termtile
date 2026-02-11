@@ -15,6 +15,7 @@ hotkey: "Mod4-Mod1-t"
 # cycle_layout_hotkey: "Mod4-Mod1-l"
 # cycle_layout_reverse_hotkey: "Mod4-Mod1-Shift-l"
 # undo_hotkey: "Mod4-Mod1-u"
+# terminal_add_hotkey: "Mod4-Mod1-n"  # Add a terminal to the active workspace.
 
 # Gap between tiled windows (pixels).
 gap_size: 8
@@ -49,6 +50,11 @@ terminal_sort: "position"
 
 # Logging: debug, info, warning, error.
 log_level: "info"
+
+# Optional X11 env overrides for MCP window-mode agent spawns.
+# Useful when the MCP server is launched without DISPLAY/XAUTHORITY in env.
+# display: ":1"
+# xauthority: "/home/you/.Xauthority"
 
 # Safety limits to prevent runaway terminal spawning (optional).
 # limits:

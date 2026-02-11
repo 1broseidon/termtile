@@ -71,14 +71,14 @@ type RawMasterStack struct {
 }
 
 type RawLayout struct {
-	Inherits          *string          `yaml:"inherits"`
-	Mode              *LayoutMode      `yaml:"mode"`
-	TileRegion        *RawTileRegion   `yaml:"tile_region"`
-	FixedGrid         *RawFixedGrid    `yaml:"fixed_grid"`
-	MasterStack       *RawMasterStack  `yaml:"master_stack"`
-	MaxTerminalWidth  *int             `yaml:"max_terminal_width"`
-	MaxTerminalHeight *int             `yaml:"max_terminal_height"`
-	FlexibleLastRow   *bool            `yaml:"flexible_last_row"`
+	Inherits          *string         `yaml:"inherits"`
+	Mode              *LayoutMode     `yaml:"mode"`
+	TileRegion        *RawTileRegion  `yaml:"tile_region"`
+	FixedGrid         *RawFixedGrid   `yaml:"fixed_grid"`
+	MasterStack       *RawMasterStack `yaml:"master_stack"`
+	MaxTerminalWidth  *int            `yaml:"max_terminal_width"`
+	MaxTerminalHeight *int            `yaml:"max_terminal_height"`
+	FlexibleLastRow   *bool           `yaml:"flexible_last_row"`
 }
 
 type RawWorkspaceLimit struct {
@@ -102,28 +102,100 @@ type RawLoggingConfig struct {
 	PreviewLength  *int    `yaml:"preview_length"`
 }
 
+type RawAgentMode struct {
+	ProtectSlotZero *bool `yaml:"protect_slot_zero"`
+}
+
+type RawProjectWorkspaceProject struct {
+	RootMarker *string `yaml:"root_marker"`
+	CWDMode    *string `yaml:"cwd_mode"`
+	CWD        *string `yaml:"cwd"`
+}
+
+type RawProjectWorkspaceMCPSpawn struct {
+	RequireExplicitWorkspace *bool    `yaml:"require_explicit_workspace"`
+	ResolutionOrder          []string `yaml:"resolution_order"`
+}
+
+type RawProjectWorkspaceMCPRead struct {
+	DefaultLines     *int  `yaml:"default_lines"`
+	MaxLines         *int  `yaml:"max_lines"`
+	SinceLastDefault *bool `yaml:"since_last_default"`
+}
+
+type RawProjectWorkspaceMCP struct {
+	Spawn *RawProjectWorkspaceMCPSpawn `yaml:"spawn"`
+	Read  *RawProjectWorkspaceMCPRead  `yaml:"read"`
+}
+
+type RawProjectWorkspaceAgentDefaults struct {
+	SpawnMode *string           `yaml:"spawn_mode"`
+	Model     *string           `yaml:"model"`
+	Env       map[string]string `yaml:"env"`
+}
+
+type RawProjectWorkspaceAgentOverride struct {
+	SpawnMode *string           `yaml:"spawn_mode"`
+	Model     *string           `yaml:"model"`
+	Env       map[string]string `yaml:"env"`
+}
+
+type RawProjectWorkspaceAgents struct {
+	Defaults  *RawProjectWorkspaceAgentDefaults           `yaml:"defaults"`
+	Overrides map[string]RawProjectWorkspaceAgentOverride `yaml:"overrides"`
+}
+
+type RawProjectWorkspaceOverrides struct {
+	Layout               *string `yaml:"layout"`
+	Terminal             *string `yaml:"terminal"`
+	TerminalSpawnCommand *string `yaml:"terminal_spawn_command"`
+}
+
+type RawProjectWorkspaceSync struct {
+	Mode                *string  `yaml:"mode"`
+	PullOnWorkspaceLoad *bool    `yaml:"pull_on_workspace_load"`
+	PushOnWorkspaceSave *bool    `yaml:"push_on_workspace_save"`
+	Include             []string `yaml:"include"`
+}
+
+// RawProjectWorkspaceConfig represents .termtile/workspace.yaml and .termtile/local.yaml.
+type RawProjectWorkspaceConfig struct {
+	Version            *int                          `yaml:"version"`
+	Workspace          *string                       `yaml:"workspace"`
+	Project            *RawProjectWorkspaceProject   `yaml:"project"`
+	MCP                *RawProjectWorkspaceMCP       `yaml:"mcp"`
+	Agents             *RawProjectWorkspaceAgents    `yaml:"agents"`
+	WorkspaceOverrides *RawProjectWorkspaceOverrides `yaml:"workspace_overrides"`
+	Sync               *RawProjectWorkspaceSync      `yaml:"sync"`
+}
+
 type RawConfig struct {
-	Include                  IncludeList            `yaml:"include"`
-	Hotkey                   *string                `yaml:"hotkey"`
-	CycleLayoutHotkey        *string                `yaml:"cycle_layout_hotkey"`
-	CycleLayoutReverseHotkey *string                `yaml:"cycle_layout_reverse_hotkey"`
-	UndoHotkey               *string                `yaml:"undo_hotkey"`
-	PaletteHotkey            *string                `yaml:"palette_hotkey"`
-	PaletteBackend           *string                `yaml:"palette_backend"`
-	PaletteFuzzyMatching     *bool                  `yaml:"palette_fuzzy_matching"`
-	PreferredTerminal        *string                `yaml:"preferred_terminal"`
-	TerminalSpawnCommands    map[string]string      `yaml:"terminal_spawn_commands"`
-	GapSize                  *int                   `yaml:"gap_size"`
-	ScreenPadding            *RawMargins            `yaml:"screen_padding"`
-	DefaultLayout            *string                `yaml:"default_layout"`
-	Layouts                  map[string]RawLayout   `yaml:"layouts"`
-	TerminalClasses          TerminalClassList      `yaml:"terminal_classes"`
-	TerminalSort             *string                `yaml:"terminal_sort"`
-	LogLevel                 *string                `yaml:"log_level"`
-	TerminalMargins          map[string]RawMargins  `yaml:"terminal_margins"`
-	Limits                   *RawLimits             `yaml:"limits"`
-	Logging                  *RawLoggingConfig      `yaml:"logging"`
-	Agents                   map[string]AgentConfig `yaml:"agents"`
+	Include                  IncludeList                `yaml:"include"`
+	Hotkey                   *string                    `yaml:"hotkey"`
+	CycleLayoutHotkey        *string                    `yaml:"cycle_layout_hotkey"`
+	CycleLayoutReverseHotkey *string                    `yaml:"cycle_layout_reverse_hotkey"`
+	UndoHotkey               *string                    `yaml:"undo_hotkey"`
+	TerminalAddHotkey        *string                    `yaml:"terminal_add_hotkey"`
+	PaletteHotkey            *string                    `yaml:"palette_hotkey"`
+	PaletteBackend           *string                    `yaml:"palette_backend"`
+	PaletteFuzzyMatching     *bool                      `yaml:"palette_fuzzy_matching"`
+	Display                  *string                    `yaml:"display"`
+	XAuthority               *string                    `yaml:"xauthority"`
+	PreferredTerminal        *string                    `yaml:"preferred_terminal"`
+	TerminalSpawnCommands    map[string]string          `yaml:"terminal_spawn_commands"`
+	GapSize                  *int                       `yaml:"gap_size"`
+	ScreenPadding            *RawMargins                `yaml:"screen_padding"`
+	DefaultLayout            *string                    `yaml:"default_layout"`
+	Layouts                  map[string]RawLayout       `yaml:"layouts"`
+	TerminalClasses          TerminalClassList          `yaml:"terminal_classes"`
+	TerminalSort             *string                    `yaml:"terminal_sort"`
+	LogLevel                 *string                    `yaml:"log_level"`
+	TerminalMargins          map[string]RawMargins      `yaml:"terminal_margins"`
+	AgentMode                *RawAgentMode              `yaml:"agent_mode"`
+	Limits                   *RawLimits                 `yaml:"limits"`
+	Logging                  *RawLoggingConfig          `yaml:"logging"`
+	Agents                   map[string]AgentConfig     `yaml:"agents"`
+	ProjectWorkspace         *RawProjectWorkspaceConfig `yaml:"-"`
 }
 
 func (c RawConfig) merge(overlay RawConfig) RawConfig {
@@ -141,6 +213,9 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 	if overlay.UndoHotkey != nil {
 		out.UndoHotkey = overlay.UndoHotkey
 	}
+	if overlay.TerminalAddHotkey != nil {
+		out.TerminalAddHotkey = overlay.TerminalAddHotkey
+	}
 	if overlay.PaletteHotkey != nil {
 		out.PaletteHotkey = overlay.PaletteHotkey
 	}
@@ -149,6 +224,12 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 	}
 	if overlay.PaletteFuzzyMatching != nil {
 		out.PaletteFuzzyMatching = overlay.PaletteFuzzyMatching
+	}
+	if overlay.Display != nil {
+		out.Display = overlay.Display
+	}
+	if overlay.XAuthority != nil {
+		out.XAuthority = overlay.XAuthority
 	}
 	if overlay.PreferredTerminal != nil {
 		out.PreferredTerminal = overlay.PreferredTerminal
@@ -278,6 +359,15 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 		}
 	}
 
+	if overlay.AgentMode != nil {
+		if out.AgentMode == nil {
+			out.AgentMode = &RawAgentMode{}
+		}
+		if overlay.AgentMode.ProtectSlotZero != nil {
+			out.AgentMode.ProtectSlotZero = overlay.AgentMode.ProtectSlotZero
+		}
+	}
+
 	if overlay.Agents != nil {
 		if out.Agents == nil {
 			out.Agents = make(map[string]AgentConfig, len(overlay.Agents))
@@ -292,6 +382,9 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 				}
 				if !agent.ResponseFence {
 					agent.ResponseFence = base.ResponseFence
+				}
+				if !agent.PipeTask {
+					agent.PipeTask = base.PipeTask
 				}
 				if agent.SpawnMode == "" {
 					agent.SpawnMode = base.SpawnMode
@@ -311,6 +404,14 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 			}
 			out.Agents[name] = agent
 		}
+	}
+
+	if overlay.ProjectWorkspace != nil {
+		if out.ProjectWorkspace == nil {
+			out.ProjectWorkspace = &RawProjectWorkspaceConfig{}
+		}
+		merged := mergeRawProjectWorkspace(*out.ProjectWorkspace, *overlay.ProjectWorkspace)
+		out.ProjectWorkspace = &merged
 	}
 
 	return out
@@ -423,6 +524,204 @@ func mergeRawLayout(base RawLayout, overlay RawLayout) RawLayout {
 	}
 	if overlay.FlexibleLastRow != nil {
 		out.FlexibleLastRow = overlay.FlexibleLastRow
+	}
+	return out
+}
+
+func mergeRawProjectWorkspace(base RawProjectWorkspaceConfig, overlay RawProjectWorkspaceConfig) RawProjectWorkspaceConfig {
+	out := base
+	if overlay.Version != nil {
+		out.Version = overlay.Version
+	}
+	if overlay.Workspace != nil {
+		out.Workspace = overlay.Workspace
+	}
+	if overlay.Project != nil {
+		if out.Project == nil {
+			out.Project = &RawProjectWorkspaceProject{}
+		}
+		merged := mergeRawProjectWorkspaceProject(*out.Project, *overlay.Project)
+		out.Project = &merged
+	}
+	if overlay.MCP != nil {
+		if out.MCP == nil {
+			out.MCP = &RawProjectWorkspaceMCP{}
+		}
+		merged := mergeRawProjectWorkspaceMCP(*out.MCP, *overlay.MCP)
+		out.MCP = &merged
+	}
+	if overlay.Agents != nil {
+		if out.Agents == nil {
+			out.Agents = &RawProjectWorkspaceAgents{}
+		}
+		merged := mergeRawProjectWorkspaceAgents(*out.Agents, *overlay.Agents)
+		out.Agents = &merged
+	}
+	if overlay.WorkspaceOverrides != nil {
+		if out.WorkspaceOverrides == nil {
+			out.WorkspaceOverrides = &RawProjectWorkspaceOverrides{}
+		}
+		merged := mergeRawProjectWorkspaceOverrides(*out.WorkspaceOverrides, *overlay.WorkspaceOverrides)
+		out.WorkspaceOverrides = &merged
+	}
+	if overlay.Sync != nil {
+		if out.Sync == nil {
+			out.Sync = &RawProjectWorkspaceSync{}
+		}
+		merged := mergeRawProjectWorkspaceSync(*out.Sync, *overlay.Sync)
+		out.Sync = &merged
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceProject(base RawProjectWorkspaceProject, overlay RawProjectWorkspaceProject) RawProjectWorkspaceProject {
+	out := base
+	if overlay.RootMarker != nil {
+		out.RootMarker = overlay.RootMarker
+	}
+	if overlay.CWDMode != nil {
+		out.CWDMode = overlay.CWDMode
+	}
+	if overlay.CWD != nil {
+		out.CWD = overlay.CWD
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceMCP(base RawProjectWorkspaceMCP, overlay RawProjectWorkspaceMCP) RawProjectWorkspaceMCP {
+	out := base
+	if overlay.Spawn != nil {
+		if out.Spawn == nil {
+			out.Spawn = &RawProjectWorkspaceMCPSpawn{}
+		}
+		merged := mergeRawProjectWorkspaceMCPSpawn(*out.Spawn, *overlay.Spawn)
+		out.Spawn = &merged
+	}
+	if overlay.Read != nil {
+		if out.Read == nil {
+			out.Read = &RawProjectWorkspaceMCPRead{}
+		}
+		merged := mergeRawProjectWorkspaceMCPRead(*out.Read, *overlay.Read)
+		out.Read = &merged
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceMCPSpawn(base RawProjectWorkspaceMCPSpawn, overlay RawProjectWorkspaceMCPSpawn) RawProjectWorkspaceMCPSpawn {
+	out := base
+	if overlay.RequireExplicitWorkspace != nil {
+		out.RequireExplicitWorkspace = overlay.RequireExplicitWorkspace
+	}
+	if overlay.ResolutionOrder != nil {
+		out.ResolutionOrder = append([]string(nil), overlay.ResolutionOrder...)
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceMCPRead(base RawProjectWorkspaceMCPRead, overlay RawProjectWorkspaceMCPRead) RawProjectWorkspaceMCPRead {
+	out := base
+	if overlay.DefaultLines != nil {
+		out.DefaultLines = overlay.DefaultLines
+	}
+	if overlay.MaxLines != nil {
+		out.MaxLines = overlay.MaxLines
+	}
+	if overlay.SinceLastDefault != nil {
+		out.SinceLastDefault = overlay.SinceLastDefault
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceAgentDefaults(base RawProjectWorkspaceAgentDefaults, overlay RawProjectWorkspaceAgentDefaults) RawProjectWorkspaceAgentDefaults {
+	out := base
+	if overlay.SpawnMode != nil {
+		out.SpawnMode = overlay.SpawnMode
+	}
+	if overlay.Model != nil {
+		out.Model = overlay.Model
+	}
+	if overlay.Env != nil {
+		if out.Env == nil {
+			out.Env = make(map[string]string, len(overlay.Env))
+		}
+		for key, value := range overlay.Env {
+			out.Env[key] = value
+		}
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceAgentOverride(base RawProjectWorkspaceAgentOverride, overlay RawProjectWorkspaceAgentOverride) RawProjectWorkspaceAgentOverride {
+	out := base
+	if overlay.SpawnMode != nil {
+		out.SpawnMode = overlay.SpawnMode
+	}
+	if overlay.Model != nil {
+		out.Model = overlay.Model
+	}
+	if overlay.Env != nil {
+		if out.Env == nil {
+			out.Env = make(map[string]string, len(overlay.Env))
+		}
+		for key, value := range overlay.Env {
+			out.Env[key] = value
+		}
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceAgents(base RawProjectWorkspaceAgents, overlay RawProjectWorkspaceAgents) RawProjectWorkspaceAgents {
+	out := base
+	if overlay.Defaults != nil {
+		if out.Defaults == nil {
+			out.Defaults = &RawProjectWorkspaceAgentDefaults{}
+		}
+		merged := mergeRawProjectWorkspaceAgentDefaults(*out.Defaults, *overlay.Defaults)
+		out.Defaults = &merged
+	}
+	if overlay.Overrides != nil {
+		if out.Overrides == nil {
+			out.Overrides = make(map[string]RawProjectWorkspaceAgentOverride, len(overlay.Overrides))
+		}
+		for name, patch := range overlay.Overrides {
+			basePatch, ok := out.Overrides[name]
+			if !ok {
+				out.Overrides[name] = patch
+				continue
+			}
+			out.Overrides[name] = mergeRawProjectWorkspaceAgentOverride(basePatch, patch)
+		}
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceOverrides(base RawProjectWorkspaceOverrides, overlay RawProjectWorkspaceOverrides) RawProjectWorkspaceOverrides {
+	out := base
+	if overlay.Layout != nil {
+		out.Layout = overlay.Layout
+	}
+	if overlay.Terminal != nil {
+		out.Terminal = overlay.Terminal
+	}
+	if overlay.TerminalSpawnCommand != nil {
+		out.TerminalSpawnCommand = overlay.TerminalSpawnCommand
+	}
+	return out
+}
+
+func mergeRawProjectWorkspaceSync(base RawProjectWorkspaceSync, overlay RawProjectWorkspaceSync) RawProjectWorkspaceSync {
+	out := base
+	if overlay.Mode != nil {
+		out.Mode = overlay.Mode
+	}
+	if overlay.PullOnWorkspaceLoad != nil {
+		out.PullOnWorkspaceLoad = overlay.PullOnWorkspaceLoad
+	}
+	if overlay.PushOnWorkspaceSave != nil {
+		out.PushOnWorkspaceSave = overlay.PushOnWorkspaceSave
+	}
+	if overlay.Include != nil {
+		out.Include = append([]string(nil), overlay.Include...)
 	}
 	return out
 }

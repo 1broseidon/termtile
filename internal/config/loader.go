@@ -35,6 +35,13 @@ type LoadResult struct {
 	Files       []string          // all loaded files, in load order
 }
 
+const (
+	projectConfigDirName     = ".termtile"
+	projectWorkspaceFileName = "workspace.yaml"
+	projectLocalOverrideName = "local.yaml"
+	projectSourcePathPrefix  = "project_workspace"
+)
+
 func DefaultConfigPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -62,26 +69,59 @@ func LoadWithSources() (*LoadResult, error) {
 	return LoadFromPath(path)
 }
 
-func LoadFromPath(path string) (*LoadResult, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		cfg := DefaultConfig()
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
-		return &LoadResult{
-			Config:      cfg,
-			Sources:     map[string]Source{},
-			LayoutBases: defaultLayoutBases(cfg),
-			Files:       nil,
-		}, nil
-	}
-
-	seen := make(map[string]struct{})
-	var stack []string
-
-	raw, sources, files, err := loadRawMerged(path, seen, stack)
+// LoadWithProjectSources loads global config plus project-scoped overrides from
+// .termtile/workspace.yaml and .termtile/local.yaml under projectRoot.
+func LoadWithProjectSources(projectRoot string) (*LoadResult, error) {
+	path, err := DefaultConfigPath()
 	if err != nil {
 		return nil, err
+	}
+	return LoadFromPathWithProject(path, projectRoot)
+}
+
+func LoadFromPath(path string) (*LoadResult, error) {
+	return loadFromPath(path, "")
+}
+
+// LoadFromPathWithProject loads config from path and merges project-scoped
+// overrides from projectRoot/.termtile/workspace.yaml and local.yaml.
+func LoadFromPathWithProject(path string, projectRoot string) (*LoadResult, error) {
+	return loadFromPath(path, projectRoot)
+}
+
+func loadFromPath(path string, projectRoot string) (*LoadResult, error) {
+	raw := RawConfig{}
+	sources := map[string]Source{}
+	var files []string
+
+	if exists, err := pathExists(path); err != nil {
+		return nil, err
+	} else if exists {
+		seen := make(map[string]struct{})
+		var stack []string
+		globalRaw, globalSources, globalFiles, err := loadRawMerged(path, seen, stack)
+		if err != nil {
+			return nil, err
+		}
+		raw = raw.merge(globalRaw)
+		for key, src := range globalSources {
+			sources[key] = src
+		}
+		files = append(files, globalFiles...)
+	}
+
+	if strings.TrimSpace(projectRoot) != "" {
+		projectRaw, projectSources, projectFiles, err := loadRawProjectWorkspaceMerged(projectRoot)
+		if err != nil {
+			return nil, err
+		}
+		if projectRaw != nil {
+			raw.ProjectWorkspace = projectRaw
+			for key, src := range projectSources {
+				sources[key] = src
+			}
+			files = append(files, projectFiles...)
+		}
 	}
 
 	cfg, layoutBases, err := BuildEffectiveConfig(raw)
@@ -98,6 +138,86 @@ func LoadFromPath(path string) (*LoadResult, error) {
 		LayoutBases: layoutBases,
 		Files:       files,
 	}, nil
+}
+
+func loadRawProjectWorkspaceMerged(projectRoot string) (*RawProjectWorkspaceConfig, map[string]Source, []string, error) {
+	root, err := canonicalPath(projectRoot)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	projectDir := filepath.Join(root, projectConfigDirName)
+	workspacePath := filepath.Join(projectDir, projectWorkspaceFileName)
+	localPath := filepath.Join(projectDir, projectLocalOverrideName)
+
+	type candidate struct {
+		path     string
+		required bool
+	}
+	candidates := []candidate{
+		{path: workspacePath, required: false},
+		{path: localPath, required: false},
+	}
+
+	merged := RawProjectWorkspaceConfig{}
+	sources := map[string]Source{}
+	var files []string
+	loaded := false
+
+	for _, candidate := range candidates {
+		exists, err := pathExists(candidate.path)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !exists {
+			if candidate.required {
+				return nil, nil, nil, fmt.Errorf("%s: failed to read: file does not exist", candidate.path)
+			}
+			continue
+		}
+
+		raw, fileSources, filePath, err := loadRawProjectWorkspace(candidate.path)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		merged = mergeRawProjectWorkspace(merged, raw)
+		for key, src := range fileSources {
+			sources[prefixedSourcePath(projectSourcePathPrefix, key)] = src
+		}
+		files = append(files, filePath)
+		loaded = true
+	}
+
+	if !loaded {
+		return nil, map[string]Source{}, nil, nil
+	}
+
+	return &merged, sources, files, nil
+}
+
+func loadRawProjectWorkspace(path string) (RawProjectWorkspaceConfig, map[string]Source, string, error) {
+	canon, err := canonicalPath(path)
+	if err != nil {
+		return RawProjectWorkspaceConfig{}, nil, "", err
+	}
+
+	data, err := os.ReadFile(canon)
+	if err != nil {
+		return RawProjectWorkspaceConfig{}, nil, "", fmt.Errorf("%s: failed to read: %w", canon, err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return RawProjectWorkspaceConfig{}, nil, "", fmt.Errorf("%s: failed to parse yaml: %w", canon, err)
+	}
+
+	var raw RawProjectWorkspaceConfig
+	if err := decodeStrictYAML(data, &raw); err != nil {
+		return RawProjectWorkspaceConfig{}, nil, "", fmt.Errorf("%s: %w", canon, err)
+	}
+
+	sources := collectSources(&doc, canon)
+	return raw, sources, canon, nil
 }
 
 type includeRef struct {
@@ -249,6 +369,27 @@ func resolvePathRelativeToFile(baseFile string, include string) (string, error) 
 		return include, nil
 	}
 	return filepath.Join(filepath.Dir(baseFile), include), nil
+}
+
+func prefixedSourcePath(prefix string, path string) string {
+	if strings.TrimSpace(path) == "" {
+		return prefix
+	}
+	if prefix == "" {
+		return path
+	}
+	return prefix + "." + path
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func collectSources(doc *yaml.Node, file string) map[string]Source {

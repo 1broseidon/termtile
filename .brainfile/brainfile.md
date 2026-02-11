@@ -59,7 +59,54 @@ columns:
           - phase-2
   - id: in-progress
     title: In Progress
-    tasks: []
+    tasks:
+      - id: task-99
+        title: "Super+Alt+R selector refactor: discover, fix, and deploy"
+        description: Current Super+Alt+R selector UX is inconsistent and visually incorrect (outline sizing mismatch, overlay menu visibility issues, and phase-dependent rendering glitches). Run a focused discovery to identify root causes, then define an implementation and rollout plan that restores predictable behavior and consistent visuals.
+        priority: high
+        tags:
+          - shortcuts
+          - movemode
+          - overlay
+          - ux
+          - refactor
+        relatedFiles:
+          - internal/movemode/movemode.go
+          - internal/movemode/overlay.go
+          - internal/movemode/state.go
+          - docs/daemon.md
+          - docs/configuration.md
+        subtasks:
+          - id: task-99-1
+            title: Reproduce current selector UX issues and catalog exact failure modes
+            completed: false
+          - id: task-99-2
+            title: Trace root causes in move-mode state, overlay rendering, and border geometry logic
+            completed: false
+          - id: task-99-3
+            title: Propose refactor architecture and phased rollout plan
+            completed: false
+          - id: task-99-4
+            title: Define implementation tasks/contracts for parallel delegation
+            completed: false
+        contract:
+          status: in_progress
+          deliverables:
+            - type: file
+              path: .brainfile/plans/super-alt-r-selector-refactor-discovery.md
+              description: Discovery report with reproducible issues, root causes, and refactor blueprint
+            - type: file
+              path: .brainfile/plans/super-alt-r-selector-refactor-discovery.md
+              description: Task breakdown for follow-on implementation/deploy contracts
+          validation:
+            commands:
+              - test -f .brainfile/plans/super-alt-r-selector-refactor-discovery.md
+          constraints:
+            - "Discovery-first pass: do not modify production code in this task"
+            - Report must include exact file/function touch points for each root cause
+            - Include rollout/testing strategy to validate visual parity and interaction correctness
+            - Output summary must be consumable for immediate parallel task delegation
+        assignee: pi-explore-alt-r
   - id: done
     title: Done
     tasks:
@@ -273,12 +320,376 @@ columns:
             title: Convert mp4 to 2x speed gif (1720px wide)
             completed: true
       - id: task-94
-        title: "Test issue: brainfile sync validation"
-        description: Temporary test task to validate the brainfile-to-GitHub-Issues sync pipeline. Should appear as an open issue, then close when moved to done.
-        priority: low
+        title: Fix workspace resolution bug + add move_terminal feature
+        description: "When MCP server spawns terminal windows, resolveWorkspaceName() resolves based on the currently visible desktop. If the user switches desktops while agents work, new terminals spawn on the wrong desktop. Fix: after spawning, correct the window's desktop via EWMH. Also add move_terminal MCP tool and terminal move CLI command."
+        priority: high
         tags:
-          - test
-          - ci
+          - bug
+          - mcp
+          - feature
+          - x11
+          - workspace
+        relatedFiles:
+          - internal/x11/desktop.go
+          - internal/platform/backend_linux.go
+          - internal/mcp/tools.go
+          - internal/mcp/types.go
+          - internal/mcp/server.go
+          - internal/workspace/state.go
+          - cmd/termtile/terminal.go
+        subtasks:
+          - id: task-94-1
+            title: "X11: Add SetWindowDesktop + FindWindowByTitle"
+            completed: true
+          - id: task-94-2
+            title: "Platform: Add standalone functions for window move"
+            completed: true
+          - id: task-94-3
+            title: "Bug fix: Correct desktop in spawnWindow after spawn"
+            completed: true
+          - id: task-94-4
+            title: "Workspace state: Add MoveTerminalBetweenWorkspaces"
+            completed: true
+          - id: task-94-5
+            title: "MCP types + server: Add move_terminal tool"
+            completed: true
+          - id: task-94-6
+            title: "MCP tools: Implement handleMoveTerminal handler"
+            completed: true
+          - id: task-94-7
+            title: "CLI: Add terminal move subcommand"
+            completed: true
+          - id: task-94-8
+            title: "Tests: workspace state + MCP server tests"
+            completed: true
+          - id: task-94-9
+            title: "Verify: go vet + go test pass"
+            completed: true
+      - id: task-95
+        title: "Audit CLI commands: remove dead references from help menus"
+        description: "Review all termtile CLI subcommands and their help/usage text. Cross-reference the command router in main.go with actual implementations. Remove any help text, usage strings, or documentation references to commands that don't have working implementations. Check: main.go top-level commands, layout subcommands, config subcommands, terminal subcommands, workspace subcommands, palette subcommands, mcp subcommands."
+        priority: medium
+        tags:
+          - cli
+          - cleanup
+        relatedFiles:
+          - cmd/termtile/main.go
+          - cmd/termtile/terminal.go
+          - cmd/termtile/workspace.go
+          - cmd/termtile/palette.go
+          - cmd/termtile/mcp.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: cmd/termtile/main.go
+              description: Remove dead command references from help and router
+            - type: file
+              path: cmd/termtile/terminal.go
+              description: Remove dead terminal subcommand references if any
+            - type: file
+              path: cmd/termtile/workspace.go
+              description: Remove dead workspace subcommand references if any
+            - type: file
+              path: cmd/termtile/palette.go
+              description: Remove dead palette subcommand references if any
+            - type: file
+              path: cmd/termtile/mcp.go
+              description: Remove dead mcp subcommand references if any
+          validation:
+            commands:
+              - go vet ./...
+              - go build ./cmd/termtile/
+          constraints:
+            - Only remove references to commands that truly have no implementation
+            - Do not remove working commands
+            - Do not add new functionality
+            - Run go vet ./... after changes
+      - id: task-96
+        title: "Shortcut UX: add dedicated Super+Alt+N terminal-add hotkey"
+        description: Implement a first-class hotkey for adding a terminal to the active workspace on the current desktop, using existing terminal-add behavior and limits. This is the fast-path complement to move mode.
+        priority: high
+        tags:
+          - shortcuts
+          - hotkeys
+          - workspace
+          - ux
+        relatedFiles:
+          - internal/config/config.go
+          - internal/config/raw.go
+          - internal/config/effective.go
+          - internal/config/explain.go
+          - cmd/termtile/main.go
+          - docs/configuration.md
+          - configs/termtile.yaml
+        subtasks:
+          - id: task-96-1
+            title: Add config key and default for terminal-add hotkey (Mod4-Mod1-n)
+            completed: true
+          - id: task-96-2
+            title: Register daemon callback for the hotkey and execute add-terminal action
+            completed: true
+          - id: task-96-3
+            title: Ensure action behaves safely when no active workspace is present
+            completed: true
+          - id: task-96-4
+            title: Document hotkey in docs/configuration.md and sample config
+            completed: true
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: internal/config/config.go
+              description: Add terminal_add_hotkey config field and default
+            - type: file
+              path: internal/config/raw.go
+              description: Wire raw config overlay support for terminal_add_hotkey
+            - type: file
+              path: internal/config/effective.go
+              description: Apply effective config merge for terminal_add_hotkey
+            - type: file
+              path: internal/config/explain.go
+              description: Expose config explain support for terminal_add_hotkey
+            - type: file
+              path: cmd/termtile/main.go
+              description: Register hotkey callback and run terminal add flow
+            - type: file
+              path: docs/configuration.md
+              description: Document new hotkey in Hotkeys section
+            - type: file
+              path: configs/termtile.yaml
+              description: Add commented sample entry for terminal_add_hotkey
+          validation:
+            commands:
+              - go test ./internal/config/...
+              - go test ./cmd/termtile/...
+              - go test ./...
+          constraints:
+            - Default behavior must preserve existing hotkeys and not alter move mode semantics
+            - If no active workspace is present, fail gracefully with logging and no daemon crash
+            - Reuse existing terminal add path rather than implementing a duplicate add workflow
+            - Keep hotkey registration style consistent with existing daemon hotkey registrations
+        assignee: pi-shortcuts-96
+      - id: task-97
+        title: "Shortcut UX: extend Super+Alt+R mode with action keys (delete/add/append)"
+        description: Evolve move mode into a unified terminal action mode. In selecting phase, support action keys like D (remove selected slot), N (insert terminal after selected slot), and A (append terminal). Keep Enter/arrow behavior for relocate flow intact.
+        priority: high
+        tags:
+          - shortcuts
+          - movemode
+          - hotkeys
+          - ux
+        relatedFiles:
+          - internal/movemode/state.go
+          - internal/movemode/movemode.go
+          - cmd/termtile/main.go
+          - cmd/termtile/terminal.go
+          - internal/workspace/state.go
+          - internal/movemode/navigation_test.go
+        subtasks:
+          - id: task-97-1
+            title: Add explicit action-phase state for destructive confirmation (delete confirm)
+            completed: true
+          - id: task-97-2
+            title: Implement key dispatch for D/N/A in move-mode key handler
+            completed: true
+          - id: task-97-3
+            title: Wire action execution to existing terminal add/remove logic
+            completed: true
+          - id: task-97-4
+            title: Add regression tests for phase transitions and key handling
+            completed: true
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: internal/movemode/state.go
+              description: Add action/confirmation state for mode key flows
+            - type: file
+              path: internal/movemode/movemode.go
+              description: Handle D/N/A keys and execute add/remove actions while preserving relocate flow
+            - type: test
+              path: internal/movemode/navigation_test.go
+              description: Add tests for action keys and state transitions
+          validation:
+            commands:
+              - go test ./internal/movemode/...
+              - go test ./...
+          constraints:
+            - Existing relocate workflow (enter, arrows, confirm, escape) must remain backward-compatible
+            - Delete must require explicit confirmation in-mode before executing removal
+            - Action handlers must fail safely and keep mode stable (no panic, no stuck keyboard grab)
+            - Do not duplicate terminal add/remove business logic; call existing CLI pathways from movemode
+        assignee: pi-shortcuts-97
+      - id: task-98
+        title: "Shortcut UX: add on-screen move-mode hint overlay for available actions"
+        description: Add a text hint overlay during Super+Alt+R mode so users can discover available shortcuts without memorization. Show phase-aware hints (select/move/confirm-delete) and key legend.
+        priority: medium
+        tags:
+          - shortcuts
+          - movemode
+          - overlay
+          - ux
+        relatedFiles:
+          - internal/movemode/overlay.go
+          - internal/movemode/movemode.go
+          - docs/daemon.md
+          - docs/configuration.md
+        subtasks:
+          - id: task-98-1
+            title: Add text-overlay primitive to overlay manager
+            completed: true
+          - id: task-98-2
+            title: Render compact key hint legend while mode is active
+            completed: true
+          - id: task-98-3
+            title: Show phase-specific hint text for selecting vs grabbed vs delete-confirm
+            completed: true
+          - id: task-98-4
+            title: Document mode controls in docs
+            completed: true
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: internal/movemode/overlay.go
+              description: Implement text-hint overlay support alongside border overlays
+            - type: file
+              path: docs/daemon.md
+              description: Document move-mode key legend and overlay behavior
+            - type: file
+              path: docs/configuration.md
+              description: Document updated move-mode interaction model
+          validation:
+            commands:
+              - go test ./internal/movemode/...
+              - go test ./...
+          constraints:
+            - Overlay must not interfere with keyboard grab handling or move responsiveness
+            - Hints must be visible but compact; avoid obscuring selected terminal borders
+            - Fallback cleanly if text rendering cannot be initialized on a given environment
+            - Do not remove or regress existing border overlays
+        assignee: pi-shortcuts-98
+      - id: task-101
+        title: "Deterministic workspace resolver: project marker + explicit ambiguity errors"
+        description: Integrate project marker workspace resolution for MCP spawn/read operations so behavior is deterministic across desktops and clients. Implement resolver chain and hard-fail ambiguity per schema v1.
+        priority: high
+        tags:
+          - mcp
+          - workspace
+          - resolver
+          - determinism
+        assignee: pi-resolver
+        relatedFiles:
+          - internal/mcp/tools.go
+          - internal/mcp/types.go
+          - internal/mcp/workspace_resolution_test.go
+          - internal/workspace/state.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/tools.go
+              description: Implement project-aware workspace resolver chain
+            - type: test
+              path: internal/mcp/workspace_resolution_test.go
+              description: Add coverage for marker-based resolution and ambiguity handling
+            - type: file
+              path: internal/mcp/types.go
+              description: Add optional source_workspace hint input where appropriate
+          validation:
+            commands:
+              - go test ./internal/mcp/...
+          constraints:
+            - Use resolver precedence from .brainfile/plans/project-workspace-schema-v1.md
+            - Explicit workspace argument must always win
+            - Ambiguous omitted-workspace cases must return clear actionable errors
+      - id: task-100
+        title: "Project workspace schema v1: add config structs + loader for .termtile/workspace.yaml"
+        description: Implement repo-local project workspace schema with merge-ready structures. Add loaders for .termtile/workspace.yaml and .termtile/local.yaml, with defaults and validation based on .brainfile/plans/project-workspace-schema-v1.md.
+        priority: high
+        tags:
+          - project-config
+          - mcp
+          - workspace
+          - schema
+        assignee: pi-schema-core
+        relatedFiles:
+          - internal/config/config.go
+          - internal/config/raw.go
+          - internal/config/effective.go
+          - internal/runtimepath/
+          - docs/configuration.md
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: internal/config/raw.go
+              description: Add raw schema types for project workspace config
+            - type: file
+              path: internal/config/config.go
+              description: Add effective project workspace config types and defaults
+            - type: file
+              path: internal/config/effective.go
+              description: Wire merge hooks for project-level config layer
+            - type: test
+              path: internal/config/config_test.go
+              description: Add tests for project config parse/default/invalid cases
+          validation:
+            commands:
+              - go test ./internal/config/...
+          constraints:
+            - Follow schema in .brainfile/plans/project-workspace-schema-v1.md
+            - Do not break existing global config loading paths
+            - Keep precedence plumbing extension-ready for resolver work
+        subtasks:
+          - id: task-100-1
+            title: Add raw and effective project workspace schema types/defaults
+            completed: true
+          - id: task-100-2
+            title: Implement project-aware loader merge for .termtile/workspace.yaml and .termtile/local.yaml
+            completed: true
+          - id: task-100-3
+            title: Add tests for project parse/default/invalid cases and run go test ./internal/config/...
+            completed: true
+      - id: task-102
+        title: "Project workflow commands: init/link/sync and docs"
+        description: Add CLI entrypoints for project-local termtile workflows and document usage. Implement termtile project init/link/sync pull/push plus user docs.
+        priority: medium
+        tags:
+          - cli
+          - docs
+          - workspace
+          - project-config
+        assignee: pi-project-cli
+        relatedFiles:
+          - cmd/termtile/main.go
+          - cmd/termtile/workspace.go
+          - docs/configuration.md
+          - README.md
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: cmd/termtile/main.go
+              description: Add project command group and subcommand wiring
+            - type: file
+              path: cmd/termtile/workspace.go
+              description: Implement init/link/sync handlers
+            - type: file
+              path: docs/configuration.md
+              description: Document .termtile/workspace.yaml and precedence
+            - type: test
+              path: cmd/termtile/
+              description: Add/extend tests for project command parsing and behavior
+          validation:
+            commands:
+              - go test ./cmd/termtile/...
+              - go test ./...
+          constraints:
+            - Command behavior must align with .brainfile/plans/project-workspace-schema-v1.md
+            - Do not regress existing workspace commands
+            - Keep sync behavior explicit and safe (no silent destructive merge)
   - id: backlog
     title: Backlog
     tasks:

@@ -60,3 +60,4 @@ __debug_bin*
 
 # Local media (raw recordings, large gifs)
 media/
+.aider*

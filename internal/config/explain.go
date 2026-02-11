@@ -10,8 +10,11 @@ import (
 // Supported paths include:
 //
 //	hotkey
+//	terminal_add_hotkey
 //	palette_hotkey
 //	palette_backend
+//	display
+//	xauthority
 //	preferred_terminal
 //	terminal
 //	limits.max_terminals_per_workspace
@@ -93,6 +96,11 @@ func lookupValue(cfg *Config, path string) (any, error) {
 			return nil, fmt.Errorf("unknown path: %s", path)
 		}
 		return cfg.UndoHotkey, nil
+	case "terminal_add_hotkey":
+		if len(parts) != 1 {
+			return nil, fmt.Errorf("unknown path: %s", path)
+		}
+		return cfg.TerminalAddHotkey, nil
 	case "palette_hotkey":
 		if len(parts) != 1 {
 			return nil, fmt.Errorf("unknown path: %s", path)
@@ -103,6 +111,16 @@ func lookupValue(cfg *Config, path string) (any, error) {
 			return nil, fmt.Errorf("unknown path: %s", path)
 		}
 		return cfg.PaletteBackend, nil
+	case "display":
+		if len(parts) != 1 {
+			return nil, fmt.Errorf("unknown path: %s", path)
+		}
+		return cfg.Display, nil
+	case "xauthority":
+		if len(parts) != 1 {
+			return nil, fmt.Errorf("unknown path: %s", path)
+		}
+		return cfg.XAuthority, nil
 	case "preferred_terminal":
 		if len(parts) != 1 {
 			return nil, fmt.Errorf("unknown path: %s", path)

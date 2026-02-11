@@ -51,6 +51,41 @@ func TestLoadFromPath_PaletteFuzzyMatching(t *testing.T) {
 	}
 }
 
+func TestLoadFromPath_DisplayAndXAuthority(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := strings.Join([]string{
+		"display: \":1\"",
+		"xauthority: \"/tmp/test-xauth\"",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if res.Config.Display != ":1" {
+		t.Fatalf("expected display :1, got %q", res.Config.Display)
+	}
+	if res.Config.XAuthority != "/tmp/test-xauth" {
+		t.Fatalf("expected xauthority /tmp/test-xauth, got %q", res.Config.XAuthority)
+	}
+
+	val, src, err := Explain(res, "display")
+	if err != nil {
+		t.Fatalf("explain display: %v", err)
+	}
+	if val != ":1" {
+		t.Fatalf("expected explain display :1, got %#v", val)
+	}
+	if src.Kind != SourceFile {
+		t.Fatalf("expected display source kind file, got %#v", src)
+	}
+}
+
 func TestLoadFromPath_StrictUnknownKeyErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -308,6 +343,24 @@ func TestResolveTerminal_PreferredTerminalNotInTerminalClassesFallsBack(t *testi
 	}
 }
 
+func TestDefaultConfig_CodexHasNoAltScreen(t *testing.T) {
+	cfg := DefaultConfig()
+	codex, ok := cfg.Agents["codex"]
+	if !ok {
+		t.Fatal("expected codex agent in default config")
+	}
+	found := false
+	for _, arg := range codex.Args {
+		if arg == "--no-alt-screen" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("codex args %v missing --no-alt-screen", codex.Args)
+	}
+}
+
 func TestDefaultConfig_AgentsPromptAsArg(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -316,6 +369,8 @@ func TestDefaultConfig_AgentsPromptAsArg(t *testing.T) {
 		"codex":        true,
 		"gemini":       true,
 		"cursor-agent": true,
+		"pi":           true,
+		"cecli":        false,
 	}
 
 	for name, wantPrompt := range expectPromptAsArg {
@@ -333,8 +388,8 @@ func TestDefaultConfig_AgentsPromptAsArg(t *testing.T) {
 		t.Errorf("expected aider to be removed from default agents")
 	}
 
-	if got := len(cfg.Agents); got != 4 {
-		t.Errorf("expected 4 default agents, got %d", got)
+	if got := len(cfg.Agents); got != 6 {
+		t.Errorf("expected 6 default agents, got %d", got)
 	}
 }
 
@@ -346,6 +401,7 @@ func TestDefaultConfig_AgentsIdlePattern(t *testing.T) {
 		"codex":        "\u203a", // ›
 		"gemini":       ">",
 		"cursor-agent": "\u2192", // →
+		"pi":           "\u2500", // ─
 	}
 
 	for name, wantPattern := range expectIdlePattern {
@@ -357,6 +413,67 @@ func TestDefaultConfig_AgentsIdlePattern(t *testing.T) {
 		if agent.IdlePattern != wantPattern {
 			t.Errorf("agent %q: IdlePattern = %q, want %q", name, agent.IdlePattern, wantPattern)
 		}
+	}
+}
+
+func TestGetProtectSlotZero(t *testing.T) {
+	// nil AgentMode pointer defaults to true.
+	var nilMode *AgentMode
+	if !nilMode.GetProtectSlotZero() {
+		t.Fatal("nil AgentMode should default to true")
+	}
+
+	// Zero-value AgentMode (nil ProtectSlotZero) defaults to true.
+	zeroMode := &AgentMode{}
+	if !zeroMode.GetProtectSlotZero() {
+		t.Fatal("zero-value AgentMode should default to true")
+	}
+
+	// Explicit true.
+	trueVal := true
+	explicitTrue := &AgentMode{ProtectSlotZero: &trueVal}
+	if !explicitTrue.GetProtectSlotZero() {
+		t.Fatal("explicit true should return true")
+	}
+
+	// Explicit false.
+	falseVal := false
+	explicitFalse := &AgentMode{ProtectSlotZero: &falseVal}
+	if explicitFalse.GetProtectSlotZero() {
+		t.Fatal("explicit false should return false")
+	}
+}
+
+func TestLoadFromPath_ProtectSlotZeroFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := "agent_mode:\n  protect_slot_zero: false\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if res.Config.AgentMode.GetProtectSlotZero() {
+		t.Fatal("expected protect_slot_zero to be false from YAML")
+	}
+}
+
+func TestLoadFromPath_ProtectSlotZeroDefaultTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("# empty\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !res.Config.AgentMode.GetProtectSlotZero() {
+		t.Fatal("expected protect_slot_zero to default to true")
 	}
 }
 
@@ -391,5 +508,211 @@ limits:
 	}
 	if got := res.Config.GetMaxTerminalsForWorkspace("other"); got != DefaultMaxTerminalsPerWorkspace {
 		t.Fatalf("expected default per-workspace limit (%d), got %d", DefaultMaxTerminalsPerWorkspace, got)
+	}
+}
+
+func TestLoadFromPathWithProject_MergesWorkspaceAndLocal(t *testing.T) {
+	root := t.TempDir()
+	globalPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(globalPath, []byte("default_layout: grid\n"), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	projectRoot := filepath.Join(root, "project")
+	projectConfigDir := filepath.Join(projectRoot, ".termtile")
+	if err := os.MkdirAll(projectConfigDir, 0755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+
+	workspacePath := filepath.Join(projectConfigDir, "workspace.yaml")
+	workspaceData := `
+version: 1
+workspace: alpha
+mcp:
+  read:
+    default_lines: 40
+workspace_overrides:
+  layout: columns
+  terminal: kitty
+agents:
+  defaults:
+    spawn_mode: pane
+    model: gpt-5
+    env:
+      TERM: xterm-256color
+  overrides:
+    codex:
+      model: gpt-5.2-codex
+`
+	if err := os.WriteFile(workspacePath, []byte(strings.TrimSpace(workspaceData)+"\n"), 0644); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+
+	localPath := filepath.Join(projectConfigDir, "local.yaml")
+	localData := `
+workspace: beta
+project:
+  cwd_mode: explicit
+  cwd: /tmp/project
+workspace_overrides:
+  terminal_spawn_command: "kitty --directory {{dir}} -- {{cmd}}"
+agents:
+  overrides:
+    codex:
+      spawn_mode: window
+      env:
+        FOO: bar
+sync:
+  mode: detached
+`
+	if err := os.WriteFile(localPath, []byte(strings.TrimSpace(localData)+"\n"), 0644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	res, err := LoadFromPathWithProject(globalPath, projectRoot)
+	if err != nil {
+		t.Fatalf("load with project: %v", err)
+	}
+
+	if res.Config.ProjectWorkspace == nil {
+		t.Fatalf("expected project workspace config to be loaded")
+	}
+	if got := res.Config.ProjectWorkspace.Workspace; got != "beta" {
+		t.Fatalf("expected local workspace override 'beta', got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.Project.CWDMode; got != ProjectCWDModeExplicit {
+		t.Fatalf("expected cwd_mode explicit, got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.Project.CWD; got != "/tmp/project" {
+		t.Fatalf("expected explicit cwd /tmp/project, got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.MCP.Read.DefaultLines; got != 40 {
+		t.Fatalf("expected mcp.read.default_lines 40, got %d", got)
+	}
+	if got := res.Config.ProjectWorkspace.MCP.Read.MaxLines; got != 100 {
+		t.Fatalf("expected mcp.read.max_lines default 100, got %d", got)
+	}
+	if got := res.Config.DefaultLayout; got != "columns" {
+		t.Fatalf("expected default_layout override columns, got %q", got)
+	}
+	if got := res.Config.PreferredTerminal; got != "kitty" {
+		t.Fatalf("expected preferred terminal override kitty, got %q", got)
+	}
+	if got := res.Config.TerminalSpawnCommands["kitty"]; got != "kitty --directory {{dir}} -- {{cmd}}" {
+		t.Fatalf("expected terminal spawn command override, got %q", got)
+	}
+
+	claude := res.Config.Agents["claude"]
+	if got := claude.SpawnMode; got != "pane" {
+		t.Fatalf("expected project default spawn_mode pane for claude, got %q", got)
+	}
+	if got := claude.DefaultModel; got != "gpt-5" {
+		t.Fatalf("expected project default model gpt-5 for claude, got %q", got)
+	}
+	if got := claude.Env["TERM"]; got != "xterm-256color" {
+		t.Fatalf("expected project default env TERM for claude, got %q", got)
+	}
+
+	codex := res.Config.Agents["codex"]
+	if got := codex.SpawnMode; got != "window" {
+		t.Fatalf("expected codex spawn_mode override window, got %q", got)
+	}
+	if got := codex.DefaultModel; got != "gpt-5.2-codex" {
+		t.Fatalf("expected codex model override gpt-5.2-codex, got %q", got)
+	}
+	if got := codex.Env["FOO"]; got != "bar" {
+		t.Fatalf("expected codex env override FOO=bar, got %q", got)
+	}
+	if got := codex.Env["TERM"]; got != "xterm-256color" {
+		t.Fatalf("expected codex to inherit defaults env TERM, got %q", got)
+	}
+
+	src, ok := res.Sources["project_workspace.workspace"]
+	if !ok {
+		t.Fatalf("expected project source for workspace")
+	}
+	if src.Kind != SourceFile || src.File != localPath {
+		t.Fatalf("expected workspace source local file %q, got %#v", localPath, src)
+	}
+
+	if len(res.Files) != 3 {
+		t.Fatalf("expected 3 loaded files, got %d (%v)", len(res.Files), res.Files)
+	}
+	if res.Files[1] != workspacePath || res.Files[2] != localPath {
+		t.Fatalf("expected project files order [workspace, local], got %v", res.Files)
+	}
+}
+
+func TestLoadFromPathWithProject_MinimalProjectConfigGetsDefaults(t *testing.T) {
+	root := t.TempDir()
+	projectConfigDir := filepath.Join(root, ".termtile")
+	if err := os.MkdirAll(projectConfigDir, 0755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+
+	workspacePath := filepath.Join(projectConfigDir, "workspace.yaml")
+	data := `
+version: 1
+workspace: ws-main
+`
+	if err := os.WriteFile(workspacePath, []byte(strings.TrimSpace(data)+"\n"), 0644); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+
+	globalPath := filepath.Join(root, "missing-global.yaml")
+	res, err := LoadFromPathWithProject(globalPath, root)
+	if err != nil {
+		t.Fatalf("load with project defaults: %v", err)
+	}
+
+	if res.Config.ProjectWorkspace == nil {
+		t.Fatalf("expected project workspace config")
+	}
+	if got := res.Config.ProjectWorkspace.Project.RootMarker; got != ".git" {
+		t.Fatalf("expected root_marker default .git, got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.Project.CWDMode; got != ProjectCWDModeProjectRoot {
+		t.Fatalf("expected cwd_mode default project_root, got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.Sync.Mode; got != ProjectSyncModeLinked {
+		t.Fatalf("expected sync mode default linked, got %q", got)
+	}
+	if got := res.Config.ProjectWorkspace.MCP.Read.DefaultLines; got != 50 {
+		t.Fatalf("expected default_lines default 50, got %d", got)
+	}
+	if got := res.Config.ProjectWorkspace.MCP.Read.MaxLines; got != 100 {
+		t.Fatalf("expected max_lines default 100, got %d", got)
+	}
+}
+
+func TestLoadFromPathWithProject_InvalidProjectVersionHasSourceContext(t *testing.T) {
+	root := t.TempDir()
+	globalPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(globalPath, []byte("# global\n"), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	projectConfigDir := filepath.Join(root, ".termtile")
+	if err := os.MkdirAll(projectConfigDir, 0755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	workspacePath := filepath.Join(projectConfigDir, "workspace.yaml")
+	data := `
+version: 2
+workspace: ws-main
+`
+	if err := os.WriteFile(workspacePath, []byte(strings.TrimSpace(data)+"\n"), 0644); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+
+	_, err := LoadFromPathWithProject(globalPath, root)
+	if err == nil {
+		t.Fatalf("expected validation error for project workspace version")
+	}
+	if !strings.Contains(err.Error(), "project_workspace.version") {
+		t.Fatalf("expected project_workspace.version in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), workspacePath+":") {
+		t.Fatalf("expected source context for workspace file, got %v", err)
 	}
 }

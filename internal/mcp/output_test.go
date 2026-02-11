@@ -87,8 +87,8 @@ func TestIsChromeLine(t *testing.T) {
 		{"└──────────┘", true},
 		{"├──────────┤", true},
 		{"  ─────  ", true},
-		{"", false},             // blank line is not chrome
-		{"   ", false},          // whitespace only is not chrome
+		{"", false},            // blank line is not chrome
+		{"   ", false},         // whitespace only is not chrome
 		{"hello", false},       // text
 		{"│ data │", false},    // mixed: has text
 		{"── hello ──", false}, // mixed: has text
@@ -540,6 +540,78 @@ func TestContainsIdlePattern(t *testing.T) {
 			got := containsIdlePattern(tt.text, tt.pattern)
 			if got != tt.want {
 				t.Errorf("containsIdlePattern() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeReadLines(t *testing.T) {
+	tests := []struct {
+		name  string
+		input int
+		want  int
+	}{
+		{name: "default when unset", input: 0, want: 50},
+		{name: "default when negative", input: -10, want: 50},
+		{name: "keeps valid range", input: 72, want: 72},
+		{name: "caps large values", input: 999, want: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeReadLines(tt.input)
+			if got != tt.want {
+				t.Fatalf("normalizeReadLines(%d) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTailOutputLines(t *testing.T) {
+	input := "l1\nl2\nl3\nl4\nl5"
+	got := tailOutputLines(input, 3)
+	want := "l3\nl4\nl5"
+	if got != want {
+		t.Fatalf("tailOutputLines() = %q, want %q", got, want)
+	}
+}
+
+func TestOutputDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous string
+		current  string
+		want     string
+	}{
+		{
+			name:     "empty previous returns current",
+			previous: "",
+			current:  "a\nb",
+			want:     "a\nb",
+		},
+		{
+			name:     "identical returns empty",
+			previous: "a\nb",
+			current:  "a\nb",
+			want:     "",
+		},
+		{
+			name:     "overlap returns suffix",
+			previous: "a\nb\nc",
+			current:  "b\nc\nd\ne",
+			want:     "d\ne",
+		},
+		{
+			name:     "no overlap returns current",
+			previous: "x\ny",
+			current:  "a\nb",
+			want:     "a\nb",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := outputDelta(tt.previous, tt.current)
+			if got != tt.want {
+				t.Fatalf("outputDelta() = %q, want %q", got, tt.want)
 			}
 		})
 	}

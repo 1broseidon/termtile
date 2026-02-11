@@ -36,6 +36,13 @@ type TerminalLister interface {
 	ActiveWindowID() (uint32, error)
 }
 
+// CrossDesktopLister is an optional interface that TerminalLister implementations
+// can support to list terminals across all virtual desktops (not just the current one).
+// Used by workspace new to detect newly spawned windows that may appear on any desktop.
+type CrossDesktopLister interface {
+	ListTerminalsAllDesktops() ([]TerminalWindow, error)
+}
+
 type LayoutApplier interface {
 	ApplyLayout(layoutName string, tileNow bool) error
 	ApplyLayoutWithOrder(layoutName string, windowOrder []uint32) error

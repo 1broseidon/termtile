@@ -71,6 +71,24 @@ func GetCurrentDesktopStandalone() (int, error) {
 	return x11.GetCurrentDesktopStandalone()
 }
 
+// MoveWindowToDesktopStandalone moves a window to the specified virtual desktop
+// using a new temporary X11 connection.
+func MoveWindowToDesktopStandalone(windowID uint32, desktop int) error {
+	return x11.SetWindowDesktopStandalone(windowID, desktop)
+}
+
+// FocusWindowStandalone activates and raises a window using a new temporary
+// X11 connection.
+func FocusWindowStandalone(windowID uint32) error {
+	return x11.FocusWindowStandalone(windowID)
+}
+
+// FindWindowByTitleStandalone searches for a window by title substring
+// using a new temporary X11 connection.
+func FindWindowByTitleStandalone(substring string) (uint32, error) {
+	return x11.FindWindowByTitleStandalone(substring)
+}
+
 // Displays returns all active displays.
 func (b *LinuxBackend) Displays() ([]Display, error) {
 	conn, err := b.connection()
@@ -126,7 +144,18 @@ func (b *LinuxBackend) ActiveWindow() (WindowID, error) {
 }
 
 // ListWindowsOnDisplay lists normal windows whose centers are inside the display bounds.
+// Only windows on the current virtual desktop are returned.
 func (b *LinuxBackend) ListWindowsOnDisplay(displayID int) ([]Window, error) {
+	return b.listWindowsOnDisplay(displayID, true)
+}
+
+// ListWindowsOnDisplayAllDesktops lists normal windows whose centers are inside the
+// display bounds, across ALL virtual desktops (skips the _NET_WM_DESKTOP filter).
+func (b *LinuxBackend) ListWindowsOnDisplayAllDesktops(displayID int) ([]Window, error) {
+	return b.listWindowsOnDisplay(displayID, false)
+}
+
+func (b *LinuxBackend) listWindowsOnDisplay(displayID int, filterDesktop bool) ([]Window, error) {
 	conn, err := b.connection()
 	if err != nil {
 		return nil, err
@@ -153,9 +182,14 @@ func (b *LinuxBackend) ListWindowsOnDisplay(displayID int) ([]Window, error) {
 		return nil, err
 	}
 
-	// Get current desktop for filtering.
-	currentDesktop, desktopErr := ewmh.CurrentDesktopGet(conn.XUtil)
-	hasCurrentDesktop := desktopErr == nil
+	// Get current desktop for filtering (only when filterDesktop is true).
+	var currentDesktop uint
+	hasCurrentDesktop := false
+	if filterDesktop {
+		var desktopErr error
+		currentDesktop, desktopErr = ewmh.CurrentDesktopGet(conn.XUtil)
+		hasCurrentDesktop = desktopErr == nil
+	}
 
 	windows := make([]Window, 0, len(clients))
 	for _, windowID := range clients {
@@ -220,6 +254,15 @@ func (b *LinuxBackend) MoveResize(windowID WindowID, bounds Rect) error {
 		bounds.Width,
 		bounds.Height,
 	)
+}
+
+// Focus activates and raises a window via _NET_ACTIVE_WINDOW.
+func (b *LinuxBackend) Focus(windowID WindowID) error {
+	conn, err := b.connection()
+	if err != nil {
+		return err
+	}
+	return conn.FocusWindow(uint32(windowID))
 }
 
 // Minimize minimizes a window via WM_CHANGE_STATE.

@@ -95,9 +95,14 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  workspace close     Close active workspace")
 	fmt.Fprintln(w, "  workspace list      List saved workspaces")
 	fmt.Fprintln(w, "  workspace delete    Delete a workspace")
+	fmt.Fprintln(w, "  workspace rename    Rename a workspace")
+	fmt.Fprintln(w, "  workspace init      Initialize project workspace config")
+	fmt.Fprintln(w, "  workspace link      Link project to a canonical workspace")
+	fmt.Fprintln(w, "  workspace sync      Sync project view pull/push")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "  terminal add        Add terminal to workspace")
 	fmt.Fprintln(w, "  terminal remove     Remove terminal from workspace")
+	fmt.Fprintln(w, "  terminal move       Move terminal to another workspace")
 	fmt.Fprintln(w, "  terminal send       Send input to terminal slot")
 	fmt.Fprintln(w, "  terminal read       Read output from terminal slot")
 	fmt.Fprintln(w, "  terminal status     Show terminal/session status")
@@ -111,6 +116,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tui                 Open interactive TUI")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "  mcp serve           Start MCP server (stdio transport)")
+	fmt.Fprintln(w, "  mcp cleanup         List/clean orphaned termtile tmux sessions")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run 'termtile <command> --help' for command-specific options.")
 }
@@ -748,6 +754,43 @@ func runDaemon() {
 			log.Printf("Warning: Failed to register move mode hotkey: %v", err)
 		} else {
 			log.Printf("Move mode hotkey registered: %s", cfg.MoveModeHotkey)
+		}
+	}
+
+	// Register terminal-add hotkey if configured.
+	if cfg.TerminalAddHotkey != "" {
+		if err := hotkeyHandler.RegisterFunc(cfg.TerminalAddHotkey, func() {
+			wsInfo, err := workspace.GetActiveWorkspace()
+			if err != nil {
+				log.Printf("Terminal-add hotkey: failed to resolve active workspace: %v", err)
+				return
+			}
+			if wsInfo.Name == "" {
+				log.Printf("Terminal-add hotkey: no active workspace on current desktop")
+				return
+			}
+
+			exe, err := os.Executable()
+			if err != nil {
+				log.Printf("Terminal-add hotkey: failed to find executable: %v", err)
+				return
+			}
+
+			cmd := exec.Command(exe, "terminal", "add")
+			cmd.Stderr = os.Stderr
+			if err := cmd.Start(); err != nil {
+				log.Printf("Terminal-add hotkey: failed to launch terminal add command: %v", err)
+				return
+			}
+			go func() {
+				if err := cmd.Wait(); err != nil {
+					log.Printf("Terminal-add hotkey: terminal add command failed: %v", err)
+				}
+			}()
+		}); err != nil {
+			log.Printf("Warning: Failed to register terminal add hotkey: %v", err)
+		} else {
+			log.Printf("Terminal add hotkey registered: %s", cfg.TerminalAddHotkey)
 		}
 	}
 

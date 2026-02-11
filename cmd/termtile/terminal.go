@@ -72,6 +72,7 @@ func printTerminalUsage(w *os.File) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  termtile terminal add [flags]              Add terminal to workspace")
 	fmt.Fprintln(w, "  termtile terminal remove [flags]           Remove terminal from workspace")
+	fmt.Fprintln(w, "  termtile terminal move [flags]             Move terminal to another workspace")
 	fmt.Fprintln(w, "  termtile terminal send --slot N <text>     Send input to terminal session")
 	fmt.Fprintln(w, "  termtile terminal read --slot N [flags]    Read output from terminal session")
 	fmt.Fprintln(w, "  termtile terminal status [--json]          Show terminal/session status")
@@ -95,6 +96,8 @@ func runTerminal(args []string) int {
 		return runTerminalAdd(args[1:])
 	case "remove":
 		return runTerminalRemove(args[1:])
+	case "move":
+		return runTerminalMove(args[1:])
 	case "send":
 		return runTerminalSend(args[1:])
 	case "read":
@@ -851,6 +854,13 @@ func runTerminalRemove(args []string) int {
 		return 1
 	}
 
+	// Guard: prevent removing slot 0 in agent-mode workspaces unless --force.
+	if targetSlot == 0 && wsInfo.AgentMode && res.Config.AgentMode.GetProtectSlotZero() && !*force {
+		fmt.Fprintf(os.Stderr, "slot 0 is protected in agent-mode workspace %q (this is typically the orchestrating agent)\n", wsInfo.Name)
+		fmt.Fprintln(os.Stderr, "hint: use --force to override, or set agent_mode.protect_slot_zero: false in config")
+		return 1
+	}
+
 	// Check if slot has active tmux session
 	session := agent.SessionName(wsInfo.Name, targetSlot)
 	hasSession, _ := agent.HasSession(session)
@@ -945,6 +955,136 @@ func runTerminalRemove(args []string) int {
 	logTerminalAction(agent.ActionRemoveTerminal, wsInfo.Name, targetSlot, nil)
 
 	fmt.Printf("Removed terminal (slot %d) from workspace %q\n", targetSlot, wsInfo.Name)
+	return 0
+}
+
+func runTerminalMove(args []string) int {
+	fs := flag.NewFlagSet("move", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: termtile terminal move --slot N --to <workspace> [--workspace <source>]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Move a terminal from one workspace to another.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Flags:")
+		fs.PrintDefaults()
+	}
+	slot := fs.Int("slot", -1, "Slot index of the terminal to move")
+	targetWorkspace := fs.String("to", "", "Destination workspace name (required)")
+	srcWorkspace := fs.String("workspace", "", "Source workspace name (default: workspace on current desktop)")
+
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+
+	if *slot < 0 {
+		fmt.Fprintln(os.Stderr, "--slot is required")
+		fs.Usage()
+		return 2
+	}
+	if strings.TrimSpace(*targetWorkspace) == "" {
+		fmt.Fprintln(os.Stderr, "--to is required")
+		fs.Usage()
+		return 2
+	}
+
+	// Check tmux availability
+	if err := agent.RequireTmux(); err != nil {
+		fmt.Fprintln(os.Stderr, "tmux not available:", err)
+		return 1
+	}
+
+	// Resolve source workspace
+	var srcWsInfo workspace.WorkspaceInfo
+	if *srcWorkspace != "" {
+		ws, err := workspace.GetWorkspaceByName(*srcWorkspace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "source workspace %q not found: %v\n", *srcWorkspace, err)
+			return 1
+		}
+		srcWsInfo = ws
+	} else {
+		desktop, err := platform.GetCurrentDesktopStandalone()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to detect current desktop: %v\n", err)
+			return 1
+		}
+		var ok bool
+		srcWsInfo, ok = workspace.GetWorkspaceByDesktop(desktop)
+		if !ok || srcWsInfo.Name == "" {
+			fmt.Fprintf(os.Stderr, "no workspace on desktop %d\n", desktop)
+			return 1
+		}
+	}
+
+	if srcWsInfo.Name == *targetWorkspace {
+		fmt.Fprintln(os.Stderr, "source and target workspaces are the same")
+		return 1
+	}
+
+	// Validate slot
+	if *slot >= srcWsInfo.TerminalCount {
+		fmt.Fprintf(os.Stderr, "slot %d out of range (workspace %q has %d terminals)\n",
+			*slot, srcWsInfo.Name, srcWsInfo.TerminalCount)
+		return 1
+	}
+
+	// Look up target workspace
+	dstWsInfo, err := workspace.GetWorkspaceByName(*targetWorkspace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "target workspace %q not found: %v\n", *targetWorkspace, err)
+		return 1
+	}
+
+	// Find and move X11 window
+	oldSessionName := agent.SessionName(srcWsInfo.Name, *slot)
+	if srcWsInfo.Desktop != dstWsInfo.Desktop {
+		if windowID, err := platform.FindWindowByTitleStandalone(oldSessionName); err == nil && windowID != 0 {
+			if err := platform.MoveWindowToDesktopStandalone(windowID, dstWsInfo.Desktop); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to move window to desktop %d: %v\n", dstWsInfo.Desktop, err)
+			}
+		}
+	}
+
+	// Update workspace registry
+	newSlot, err := workspace.MoveTerminalBetweenWorkspaces(srcWsInfo.Desktop, *slot, dstWsInfo.Desktop)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to update workspace state: %v\n", err)
+		return 1
+	}
+
+	// Rename tmux session
+	newSessionName := agent.SessionName(dstWsInfo.Name, newSlot)
+	tmux := agent.NewTmuxMultiplexer()
+	if err := tmux.RenameSession(oldSessionName, newSessionName); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to rename tmux session: %v\n", err)
+	}
+
+	// Retile via IPC
+	client := ipc.NewClient()
+	layoutName := ""
+	if status, err := client.GetStatus(); err == nil && status.ActiveLayout != "" {
+		layoutName = status.ActiveLayout
+	}
+	if layoutName != "" {
+		time.Sleep(300 * time.Millisecond)
+		if err := client.ApplyLayout(layoutName, true); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to re-tile: %v\n", err)
+		}
+	}
+
+	// Log the action
+	logTerminalAction(agent.ActionMoveTerminal, srcWsInfo.Name, *slot, map[string]interface{}{
+		"target_workspace": *targetWorkspace,
+		"source_slot":      *slot,
+		"target_slot":      newSlot,
+	})
+
+	fmt.Printf("Moved terminal (slot %d) from workspace %q to %q (new slot %d)\n",
+		*slot, srcWsInfo.Name, *targetWorkspace, newSlot)
 	return 0
 }
 

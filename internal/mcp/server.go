@@ -36,6 +36,8 @@ type trackedAgent struct {
 	// and stored an artifact. Used to avoid repeatedly capturing full scrollback
 	// on every checkIdle poll once the agent is idle.
 	lastArtifactCloseCount int
+	pipeFilePath           string // path to pipe-pane output file; empty = not active
+	lastPipeSize           int64  // last stat'd file size for cheap change detection
 }
 
 // Server is the MCP server for termtile agent orchestration.
@@ -48,7 +50,9 @@ type Server struct {
 
 	mu       sync.Mutex
 	tracked  map[string]map[int]trackedAgent // workspace -> slot -> info
-	nextSlot map[string]int                  // workspace -> next slot
+	nextSlot map[string]int                  // legacy; slot allocation now uses lowest free tracked slot
+	// readSnapshots stores the most recent read_from_agent output per workspace/slot.
+	readSnapshots map[string]map[int]string // workspace -> slot -> output snapshot
 
 	// Dependency waiting hooks (primarily for tests).
 	idleCheckFn     func(target, agentType, workspace string, slot int) bool
@@ -89,6 +93,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		artifacts:       NewArtifactStore(DefaultArtifactCapBytes),
 		tracked:         make(map[string]map[int]trackedAgent),
 		nextSlot:        make(map[string]int),
+		readSnapshots:   make(map[string]map[int]string),
 		targetExistsFn:  tmuxTargetExists,
 		depPollInterval: 2 * time.Second,
 	}
@@ -123,7 +128,7 @@ func (s *Server) Close() error {
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
 		Name:        "spawn_agent",
-		Description: "Spawn a new AI agent in a terminal slot. The agent type must be configured in termtile's agents config. Optionally wait for other slots to become idle first via depends_on (polling every 2s up to depends_on_timeout, default 300s). Returns the slot number for future reference.",
+		Description: "Spawn a new AI agent in a terminal slot. The agent type must be configured in termtile's agents config. Uses the active workspace by default; pass workspace explicitly when no active workspace is available. Optionally wait for other slots to become idle first via depends_on (polling every 2s up to depends_on_timeout, default 300s). Returns the slot number for future reference.",
 	}, s.handleSpawnAgent)
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
@@ -133,7 +138,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
 		Name:        "read_from_agent",
-		Description: "Read the current terminal output from an agent's slot. Returns the last N lines of visible output. Optionally wait for a specific text pattern by setting pattern and timeout.",
+		Description: "Read the current terminal output from an agent's slot. Returns a bounded tail window (default 50 lines, max 100). Optionally wait for a specific text pattern or return only output since the previous read via since_last.",
 	}, s.handleReadFromAgent)
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
@@ -155,6 +160,11 @@ func (s *Server) registerTools() {
 		Name:        "kill_agent",
 		Description: "Kill an agent running in a specific terminal slot by destroying its tmux session.",
 	}, s.handleKillAgent)
+
+	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
+		Name:        "move_terminal",
+		Description: "Move a terminal from one workspace to another. Moves the X11 window to the target desktop, renames the tmux session, and updates workspace state.",
+	}, s.handleMoveTerminal)
 }
 
 func (s *Server) waitForDependencies(workspace string, slots []int, timeoutSeconds int) error {
@@ -256,8 +266,6 @@ func (s *Server) reconcile() {
 
 // reconcileSessionNames applies reconcile logic over a provided session list.
 func (s *Server) reconcileSessionNames(sessionNames []string) {
-	maxSlots := make(map[string]int)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -280,10 +288,6 @@ func (s *Server) reconcileSessionNames(sessionNames []string) {
 		}
 		isInRegistry := workspacepkg.HasSessionInRegistry(sessionName)
 
-		if max, ok := maxSlots[workspace]; !ok || slot > max {
-			maxSlots[workspace] = slot
-		}
-
 		// Registry-backed sessions are managed by workspace state and are not
 		// orphan MCP sessions to recover into the in-memory tracked map.
 		if isInRegistry {
@@ -301,12 +305,8 @@ func (s *Server) reconcileSessionNames(sessionNames []string) {
 
 	}
 
-	for workspace, max := range maxSlots {
-		next := max + 1
-		if next > s.nextSlot[workspace] {
-			s.nextSlot[workspace] = next
-		}
-	}
+	// Clean up stale pipe files from previous runs.
+	cleanStalePipeFiles(s.tracked)
 }
 
 // resolveSpawnMode determines the spawn mode from the request and agent config.
@@ -344,6 +344,7 @@ func (s *Server) anyPaneModeTarget(workspace string) string {
 		if s.artifacts != nil {
 			s.artifacts.Clear(workspace, slot)
 		}
+		s.clearReadSnapshot(workspace, slot)
 	}
 	return ""
 }
@@ -376,7 +377,7 @@ func findAttachedSession() string {
 func (s *Server) peekNextSlot(workspace string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.nextSlot[workspace]
+	return s.nextAvailableSlotLocked(workspace)
 }
 
 // allocateSlot returns the next available slot for a workspace and tracks the agent.
@@ -384,9 +385,38 @@ func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	slot := s.nextSlot[workspace]
-	s.nextSlot[workspace] = slot + 1
+	slot := s.nextAvailableSlotLocked(workspace)
+	s.trackSlotLocked(workspace, slot, agentType, tmuxTarget, spawnMode, responseFence)
 
+	return slot
+}
+
+func (s *Server) nextAvailableSlotLocked(workspace string) int {
+	ws := s.tracked[workspace]
+	for slot := 0; ; slot++ {
+		if _, ok := ws[slot]; !ok {
+			return slot
+		}
+	}
+}
+
+func (s *Server) trackSpecificSlot(workspace string, slot int, agentType, tmuxTarget, spawnMode string, responseFence bool) error {
+	if slot < 0 {
+		return fmt.Errorf("invalid slot %d", slot)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tracked[workspace] == nil {
+		s.tracked[workspace] = make(map[int]trackedAgent)
+	}
+	if _, exists := s.tracked[workspace][slot]; exists {
+		return fmt.Errorf("slot %d already tracked in workspace %q", slot, workspace)
+	}
+	s.trackSlotLocked(workspace, slot, agentType, tmuxTarget, spawnMode, responseFence)
+	return nil
+}
+
+func (s *Server) trackSlotLocked(workspace string, slot int, agentType, tmuxTarget, spawnMode string, responseFence bool) {
 	if s.tracked[workspace] == nil {
 		s.tracked[workspace] = make(map[int]trackedAgent)
 	}
@@ -394,12 +424,10 @@ func (s *Server) allocateSlot(workspace, agentType, tmuxTarget, spawnMode string
 		agentType:              agentType,
 		tmuxTarget:             tmuxTarget,
 		spawnMode:              spawnMode,
-		responseFence:           responseFence,
-		fencePairCount:          0,
-		lastArtifactCloseCount:  0,
+		responseFence:          responseFence,
+		fencePairCount:         0,
+		lastArtifactCloseCount: 0,
 	}
-
-	return slot
 }
 
 // updateTmuxTarget updates the tmux target for a tracked slot.
@@ -424,6 +452,9 @@ func (s *Server) removeTracked(workspace string, slot int) {
 	s.mu.Lock()
 	if ws, ok := s.tracked[workspace]; ok {
 		delete(ws, slot)
+	}
+	if rs, ok := s.readSnapshots[workspace]; ok {
+		delete(rs, slot)
 	}
 	s.mu.Unlock()
 	if s.artifacts != nil {
@@ -464,6 +495,33 @@ func (s *Server) getTmuxTarget(workspace string, slot int) (string, bool) {
 	return ta.tmuxTarget, true
 }
 
+func (s *Server) getReadSnapshot(workspace string, slot int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs := s.readSnapshots[workspace]
+	if rs == nil {
+		return ""
+	}
+	return rs[slot]
+}
+
+func (s *Server) setReadSnapshot(workspace string, slot int, output string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readSnapshots[workspace] == nil {
+		s.readSnapshots[workspace] = make(map[int]string)
+	}
+	s.readSnapshots[workspace][slot] = output
+}
+
+func (s *Server) clearReadSnapshot(workspace string, slot int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rs := s.readSnapshots[workspace]; rs != nil {
+		delete(rs, slot)
+	}
+}
+
 // getSpawnMode returns the spawn mode for a tracked slot.
 func (s *Server) getSpawnMode(workspace string, slot int) string {
 	s.mu.Lock()
@@ -492,30 +550,49 @@ func shellQuote(s string) string {
 }
 
 // checkIdle determines whether an agent in a tmux target is idle.
-// It uses a three-tier strategy:
-//  0. Fence pair counting: scan all [termtile-response] pairs, filter out
-//     instruction echoes (content == "and"), compare real pair count against
-//     the baseline stored when the task was sent.
-//  1. Content-based: if the agent has an IdlePattern configured, scan the last
-//     few non-empty lines for the pattern.
-//  2. Process-based fallback: check whether the pane process has children.
+// It uses a tiered strategy:
+//
+//	Tier 0a (pipe-pane): If a pipe file exists, stat for size change, then
+//	    read and count close tags against the baseline.
+//	Tier 0b (capture-pane fallback): Existing close-tag counting via capture-pane,
+//	    used when no pipe file is active or pipe read fails.
+//	Tier 1: Content-based detection via IdlePattern.
+//	Tier 2: Process-based fallback (pane child process check).
 func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
-	out, err := tmuxCapturePane(target, 30)
-	if err != nil {
-		return false
-	}
-
-	// Tier 0: response fence detection via close-tag counting.
-	// Count lines containing [/termtile-response] (but not [termtile-response],
-	// which filters instruction echoes) and compare against the baseline
-	// stored when the task was sent. Close tags are used instead of full
-	// pairs because the opening tag may scroll off the capture window for
-	// long responses, while the close tag stays near the bottom.
 	hasFence, baselineCount, lastArtifactCount := s.getFenceCaptureCounts(workspace, slot)
+
 	if hasFence {
+		// Tier 0a: pipe-pane based detection.
+		pipePath, lastSize := s.getPipeState(workspace, slot)
+		if pipePath != "" {
+			currentSize := pipeFileSize(pipePath)
+			if currentSize <= lastSize {
+				// File size unchanged — agent still working.
+				return false
+			}
+			// Size changed — read and count close tags.
+			count, size, err := countCloseTagsInPipeFile(pipePath)
+			if err == nil {
+				s.updateLastPipeSize(workspace, slot, size)
+				if count > baselineCount {
+					if s.artifacts != nil && count > lastArtifactCount {
+						s.captureAndStoreFenceArtifact(target, workspace, slot, count)
+					}
+					return true
+				}
+				// No new close tags yet — still working.
+				return false
+			}
+			// Pipe read failed — fall through to capture-pane fallback.
+		}
+
+		// Tier 0b: capture-pane fallback for fence detection.
+		out, err := tmuxCapturePane(target, 30)
+		if err != nil {
+			return false
+		}
 		currentCount := countCloseTags(out)
 		if currentCount > baselineCount {
-			// Capture the full fenced output exactly once per close-tag increment.
 			if s.artifacts != nil && currentCount > lastArtifactCount {
 				s.captureAndStoreFenceArtifact(target, workspace, slot, currentCount)
 			}
@@ -524,6 +601,12 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 		// Fence expected but no new response yet — the agent is still working.
 		// Do NOT fall through to Tier 1/2 which can false-positive on
 		// startup tips, rate limit prompts, etc. that match the idle pattern.
+		return false
+	}
+
+	// No fence — use capture-pane for Tier 1/2.
+	out, err := tmuxCapturePane(target, 30)
+	if err != nil {
 		return false
 	}
 
@@ -725,6 +808,57 @@ func (s *Server) getAgentType(workspace string, slot int) string {
 	return ta.agentType
 }
 
+// getPipeState returns the pipe file path and last recorded size for a tracked slot.
+func (s *Server) getPipeState(workspace string, slot int) (filePath string, lastSize int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return "", 0
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return "", 0
+	}
+	return ta.pipeFilePath, ta.lastPipeSize
+}
+
+// setPipeState sets the pipe file path for a tracked slot and resets lastPipeSize to 0.
+func (s *Server) setPipeState(workspace string, slot int, filePath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return
+	}
+	ta.pipeFilePath = filePath
+	ta.lastPipeSize = 0
+	ws[slot] = ta
+}
+
+// updateLastPipeSize updates the last recorded pipe file size for a tracked slot.
+func (s *Server) updateLastPipeSize(workspace string, slot int, size int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ws := s.tracked[workspace]
+	if ws == nil {
+		return
+	}
+	ta, ok := ws[slot]
+	if !ok {
+		return
+	}
+	ta.lastPipeSize = size
+	ws[slot] = ta
+}
+
 // triggerRetile asks the termtile daemon to re-tile all terminal windows using
 // the currently active layout. This is best-effort: if the daemon is not
 // running the error is logged and silently ignored.
@@ -770,6 +904,26 @@ func tmuxSendKeys(target, text string) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys (Enter) failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
+	return nil
+}
+
+// tmuxClearInputLine best-effort clears any partially typed input in the
+// focused prompt before automation sends a command/task. This mitigates race
+// conditions where user keystrokes land in a newly spawned terminal window.
+func tmuxClearInputLine(target string) error {
+	// Escape first to dismiss transient UI modes in prompt UIs.
+	cmd := exec.Command("tmux", "send-keys", "-t", target, "Escape")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys (Escape) failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	time.Sleep(75 * time.Millisecond)
+
+	// Ctrl-U clears the current input line in shells/readline-style prompts.
+	cmd = exec.Command("tmux", "send-keys", "-t", target, "C-u")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys (C-u) failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	time.Sleep(75 * time.Millisecond)
 	return nil
 }
 

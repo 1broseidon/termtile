@@ -14,10 +14,41 @@ const (
 	ColorGrabbed   = 0x27ae60 // Green - grabbed window
 	ColorTarget    = 0x7f8c8d // Gray - target slot / empty slot preview
 	ColorInactive  = 0x95a5a6 // Light gray - non-selected terminals
+	ColorHintText  = 0xf5f7fa // Light text for hint overlay
+	ColorHintBg    = 0x1f2933 // Dark hint background
 )
 
 // Border thickness in pixels
 const BorderThickness = 4
+
+const (
+	hintMargin     = 12
+	hintPaddingX   = 10
+	hintPaddingY   = 8
+	hintLineHeight = 16
+	hintCharWidth  = 7
+	hintMinWidth   = 220
+)
+
+// HintPhase controls which key legend is shown in the on-screen hint overlay.
+type HintPhase int
+
+const (
+	HintPhaseNone HintPhase = iota
+	HintPhaseSelecting
+	HintPhaseMove
+	HintPhaseConfirmDelete
+)
+
+// hintOverlay is a compact single-window text panel for move-mode key hints.
+type hintOverlay struct {
+	Window   xproto.Window
+	GC       xproto.Gcontext
+	Font     xproto.Font
+	created  bool
+	mapped   bool
+	disabled bool
+}
 
 // BorderOverlay represents a rectangular border made of 4 thin windows
 type BorderOverlay struct {
@@ -36,6 +67,7 @@ type OverlayManager struct {
 
 	terminalBorders []*BorderOverlay // Borders around terminal windows (decorated rects)
 	slotBorders     []*BorderOverlay // Borders around every grid slot (preview)
+	hint            *hintOverlay     // Text legend for move-mode shortcuts
 }
 
 // NewOverlayManager creates a new overlay manager
@@ -45,13 +77,14 @@ func NewOverlayManager(xu *xgbutil.XUtil, root xproto.Window) *OverlayManager {
 		root:            root,
 		terminalBorders: nil,
 		slotBorders:     nil,
+		hint:            &hintOverlay{},
 	}
 }
 
 // Render draws borders for all terminals and all grid slots.
 //
 // Slots are rendered first and terminals after, so terminal borders appear on top.
-func (m *OverlayManager) Render(terminalRects []tiling.Rect, terminalColors []uint32, slotRects []tiling.Rect, slotColors []uint32) error {
+func (m *OverlayManager) Render(terminalRects []tiling.Rect, terminalColors []uint32, slotRects []tiling.Rect, slotColors []uint32, allSlotRects []tiling.Rect, hintPhase HintPhase) error {
 	if len(terminalRects) != len(terminalColors) {
 		return fmt.Errorf("terminal rect/color length mismatch")
 	}
@@ -76,6 +109,8 @@ func (m *OverlayManager) Render(terminalRects []tiling.Rect, terminalColors []ui
 			return err
 		}
 	}
+
+	m.renderHint(hintPhase, allSlotRects, terminalRects)
 	return nil
 }
 
@@ -87,6 +122,7 @@ func (m *OverlayManager) HideAll() {
 	for _, border := range m.slotBorders {
 		m.hideBorder(border)
 	}
+	m.hideHint()
 }
 
 // Cleanup destroys all overlay windows
@@ -97,6 +133,7 @@ func (m *OverlayManager) Cleanup() {
 	for _, border := range m.slotBorders {
 		m.destroyBorder(border)
 	}
+	m.destroyHint()
 
 	m.terminalBorders = nil
 	m.slotBorders = nil
@@ -292,4 +329,349 @@ func (m *OverlayManager) updateWindow(wid xproto.Window, x, y, width, height int
 
 	// Clear window to show new color
 	xproto.ClearArea(conn, false, wid, 0, 0, 0, 0)
+}
+
+func (m *OverlayManager) renderHint(phase HintPhase, allSlotRects []tiling.Rect, avoidRects []tiling.Rect) {
+	lines := hintLinesForPhase(phase)
+	if len(lines) == 0 {
+		m.hideHint()
+		return
+	}
+
+	if !m.ensureHintResources() {
+		return
+	}
+
+	hint := m.hint
+	conn := m.xu.Conn()
+
+	width, height := hintDimensions(lines)
+	bounds := m.resolveHintBounds(allSlotRects)
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		m.hideHint()
+		return
+	}
+
+	maxWidth := bounds.Width - 2*hintMargin
+	if maxWidth < hintMinWidth {
+		maxWidth = hintMinWidth
+	}
+	if width > maxWidth {
+		width = maxWidth
+	}
+
+	maxHeight := bounds.Height - 2*hintMargin
+	if maxHeight < hintLineHeight+2*hintPaddingY {
+		maxHeight = hintLineHeight + 2*hintPaddingY
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	x, y := chooseHintPosition(bounds, avoidRects, width, height)
+
+	xproto.ConfigureWindow(
+		conn,
+		hint.Window,
+		xproto.ConfigWindowX|xproto.ConfigWindowY|xproto.ConfigWindowWidth|xproto.ConfigWindowHeight|xproto.ConfigWindowStackMode,
+		[]uint32{
+			uint32(x),
+			uint32(y),
+			uint32(width),
+			uint32(height),
+			xproto.StackModeAbove,
+		},
+	)
+	xproto.ChangeWindowAttributes(conn, hint.Window, xproto.CwBackPixel, []uint32{ColorHintBg})
+	xproto.ChangeGC(
+		conn,
+		hint.GC,
+		xproto.GcForeground|xproto.GcBackground,
+		[]uint32{ColorHintText, ColorHintBg},
+	)
+	xproto.ClearArea(conn, false, hint.Window, 0, 0, 0, 0)
+
+	baseline := hintPaddingY + hintLineHeight - 4
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		if len(line) > 255 {
+			line = line[:255]
+		}
+		lineY := baseline + i*hintLineHeight
+		xproto.ImageText8(
+			conn,
+			byte(len(line)),
+			xproto.Drawable(hint.Window),
+			hint.GC,
+			int16(hintPaddingX),
+			int16(lineY),
+			line,
+		)
+	}
+
+	xproto.MapWindow(conn, hint.Window)
+	hint.mapped = true
+}
+
+func (m *OverlayManager) ensureHintResources() bool {
+	if m.hint == nil {
+		m.hint = &hintOverlay{}
+	}
+
+	if m.hint.disabled {
+		return false
+	}
+	if m.hint.created {
+		return true
+	}
+	if m.xu == nil {
+		m.disableHint()
+		return false
+	}
+
+	conn := m.xu.Conn()
+
+	hintWindow, err := m.createOverrideRedirectWindow()
+	if err != nil {
+		m.disableHint()
+		return false
+	}
+
+	font, err := xproto.NewFontId(conn)
+	if err != nil {
+		xproto.DestroyWindow(conn, hintWindow)
+		m.disableHint()
+		return false
+	}
+
+	fontNames := []string{"fixed", "9x15", "8x13", "6x13"}
+	opened := false
+	for _, fontName := range fontNames {
+		err = xproto.OpenFontChecked(conn, font, uint16(len(fontName)), fontName).Check()
+		if err == nil {
+			opened = true
+			break
+		}
+	}
+	if !opened {
+		xproto.DestroyWindow(conn, hintWindow)
+		m.disableHint()
+		return false
+	}
+
+	gc, err := xproto.NewGcontextId(conn)
+	if err != nil {
+		xproto.CloseFont(conn, font)
+		xproto.DestroyWindow(conn, hintWindow)
+		m.disableHint()
+		return false
+	}
+
+	err = xproto.CreateGCChecked(
+		conn,
+		gc,
+		xproto.Drawable(hintWindow),
+		xproto.GcForeground|xproto.GcBackground|xproto.GcFont|xproto.GcGraphicsExposures,
+		[]uint32{
+			ColorHintText, // foreground
+			ColorHintBg,   // background
+			uint32(font),  // font
+			0,             // graphics_exposures=false
+		},
+	).Check()
+	if err != nil {
+		xproto.FreeGC(conn, gc)
+		xproto.CloseFont(conn, font)
+		xproto.DestroyWindow(conn, hintWindow)
+		m.disableHint()
+		return false
+	}
+
+	m.hint.Window = hintWindow
+	m.hint.GC = gc
+	m.hint.Font = font
+	m.hint.created = true
+	return true
+}
+
+func (m *OverlayManager) disableHint() {
+	m.destroyHint()
+	if m.hint == nil {
+		m.hint = &hintOverlay{}
+	}
+	m.hint.disabled = true
+}
+
+func (m *OverlayManager) hideHint() {
+	if m.hint == nil || !m.hint.mapped || m.xu == nil {
+		return
+	}
+	xproto.UnmapWindow(m.xu.Conn(), m.hint.Window)
+	m.hint.mapped = false
+}
+
+func (m *OverlayManager) destroyHint() {
+	if m.hint == nil || m.xu == nil {
+		return
+	}
+
+	if m.hint.GC != 0 {
+		xproto.FreeGC(m.xu.Conn(), m.hint.GC)
+	}
+	if m.hint.Font != 0 {
+		xproto.CloseFont(m.xu.Conn(), m.hint.Font)
+	}
+	if m.hint.Window != 0 {
+		xproto.DestroyWindow(m.xu.Conn(), m.hint.Window)
+	}
+
+	m.hint.Window = 0
+	m.hint.GC = 0
+	m.hint.Font = 0
+	m.hint.created = false
+	m.hint.mapped = false
+}
+
+func hintLinesForPhase(phase HintPhase) []string {
+	switch phase {
+	case HintPhaseSelecting:
+		return []string{
+			"Move Mode: select terminal",
+			"Arrows  cycle terminals",
+			"Enter   grab selected",
+			"Esc     cancel",
+		}
+	case HintPhaseMove:
+		return []string{
+			"Move Mode: choose target slot",
+			"Arrows  select target slot",
+			"Enter   move or swap",
+			"Esc     cancel",
+		}
+	case HintPhaseConfirmDelete:
+		return []string{
+			"Move Mode: confirm delete",
+			"Enter   delete terminal",
+			"Esc     keep terminal",
+		}
+	default:
+		return nil
+	}
+}
+
+func hintDimensions(lines []string) (width, height int) {
+	maxChars := 0
+	for _, line := range lines {
+		if len(line) > maxChars {
+			maxChars = len(line)
+		}
+	}
+	width = maxChars*hintCharWidth + 2*hintPaddingX
+	if width < hintMinWidth {
+		width = hintMinWidth
+	}
+	height = len(lines)*hintLineHeight + 2*hintPaddingY
+	return width, height
+}
+
+func (m *OverlayManager) resolveHintBounds(allSlotRects []tiling.Rect) tiling.Rect {
+	if bounds, ok := unionRect(allSlotRects); ok {
+		return bounds
+	}
+	if m.xu == nil || m.xu.Screen() == nil {
+		return tiling.Rect{X: 0, Y: 0, Width: 800, Height: 600}
+	}
+	screen := m.xu.Screen()
+	return tiling.Rect{
+		X:      0,
+		Y:      0,
+		Width:  int(screen.WidthInPixels),
+		Height: int(screen.HeightInPixels),
+	}
+}
+
+func chooseHintPosition(bounds tiling.Rect, avoidRects []tiling.Rect, width, height int) (int, int) {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
+	left := bounds.X + hintMargin
+	right := bounds.X + bounds.Width - hintMargin - width
+	top := bounds.Y + hintMargin
+	bottom := bounds.Y + bounds.Height - hintMargin - height
+
+	if right < left {
+		right = left
+	}
+	if bottom < top {
+		bottom = top
+	}
+
+	candidates := []tiling.Rect{
+		{X: right, Y: top, Width: width, Height: height},
+		{X: left, Y: top, Width: width, Height: height},
+		{X: right, Y: bottom, Width: width, Height: height},
+		{X: left, Y: bottom, Width: width, Height: height},
+	}
+
+	for _, candidate := range candidates {
+		obscuresSelection := false
+		for _, avoid := range avoidRects {
+			if rectsIntersect(candidate, avoid) {
+				obscuresSelection = true
+				break
+			}
+		}
+		if !obscuresSelection {
+			return candidate.X, candidate.Y
+		}
+	}
+
+	// Fallback if all corners overlap the selected/grabbed terminal.
+	return candidates[0].X, candidates[0].Y
+}
+
+func unionRect(rects []tiling.Rect) (tiling.Rect, bool) {
+	if len(rects) == 0 {
+		return tiling.Rect{}, false
+	}
+
+	minX := rects[0].X
+	minY := rects[0].Y
+	maxX := rects[0].X + rects[0].Width
+	maxY := rects[0].Y + rects[0].Height
+
+	for _, rect := range rects[1:] {
+		if rect.X < minX {
+			minX = rect.X
+		}
+		if rect.Y < minY {
+			minY = rect.Y
+		}
+		if rect.X+rect.Width > maxX {
+			maxX = rect.X + rect.Width
+		}
+		if rect.Y+rect.Height > maxY {
+			maxY = rect.Y + rect.Height
+		}
+	}
+
+	return tiling.Rect{
+		X:      minX,
+		Y:      minY,
+		Width:  maxX - minX,
+		Height: maxY - minY,
+	}, true
+}
+
+func rectsIntersect(a, b tiling.Rect) bool {
+	return a.X < b.X+b.Width &&
+		a.X+a.Width > b.X &&
+		a.Y < b.Y+b.Height &&
+		a.Y+a.Height > b.Y
 }

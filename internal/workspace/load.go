@@ -89,7 +89,23 @@ func Load(cfg *WorkspaceConfig, spawnTemplates map[string]string, lister Termina
 	// Show loading notification
 	notifyDesktop("Loading workspace", fmt.Sprintf("Restoring %s (%d terminals)...", cfg.Name, len(cfg.Terminals)))
 
-	before, err := lister.ListTerminals()
+	// Capture existing windows before spawning. When NoReplace is set (workspace new),
+	// use cross-desktop listing to capture windows from ALL desktops so that old windows
+	// on other desktops aren't mistaken for new ones during detection.
+	var before []TerminalWindow
+	var err error
+	if opts.NoReplace {
+		if cdl, ok := lister.(CrossDesktopLister); ok {
+			before, err = cdl.ListTerminalsAllDesktops()
+			if debugf != nil {
+				debugf("Using cross-desktop listing for before-capture")
+			}
+		} else {
+			before, err = lister.ListTerminals()
+		}
+	} else {
+		before, err = lister.ListTerminals()
+	}
 	if err != nil {
 		return err
 	}
@@ -243,7 +259,13 @@ func Load(cfg *WorkspaceConfig, spawnTemplates map[string]string, lister Termina
 		}
 	}
 
-	newWindowIDs, err := waitForNewTerminals(lister, existing, terms, opts.Timeout, debugf)
+	// Use cross-desktop listing for detection when NoReplace is set.
+	var crossDesktopLister CrossDesktopLister
+	if opts.NoReplace {
+		crossDesktopLister, _ = lister.(CrossDesktopLister)
+	}
+
+	newWindowIDs, err := waitForNewTerminals(lister, crossDesktopLister, existing, terms, opts.Timeout, debugf)
 	if err != nil {
 		return err
 	}
@@ -381,7 +403,7 @@ func lookupSpawnTemplate(templates map[string]string, class string) (string, boo
 	return "", false
 }
 
-func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, terms []TerminalConfig, timeout time.Duration, debugf func(string, ...any)) ([]uint32, error) {
+func waitForNewTerminals(lister TerminalLister, cdl CrossDesktopLister, existing map[uint32]struct{}, terms []TerminalConfig, timeout time.Duration, debugf func(string, ...any)) ([]uint32, error) {
 	want := len(terms)
 	if want == 0 {
 		return nil, nil
@@ -404,7 +426,14 @@ func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, te
 	seen := make(map[uint32]struct{})
 
 	for {
-		windows, err := lister.ListTerminals()
+		// Use cross-desktop listing if available, otherwise fall back to current desktop.
+		var windows []TerminalWindow
+		var err error
+		if cdl != nil {
+			windows, err = cdl.ListTerminalsAllDesktops()
+		} else {
+			windows, err = lister.ListTerminals()
+		}
 		if err == nil {
 			for _, w := range windows {
 				if _, ok := existing[w.WindowID]; ok {
@@ -419,7 +448,19 @@ func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, te
 				}
 
 				class := normalizedWMClass(w.WMClass)
-				slots := pendingSlotsByClass[class]
+				// Try exact match first, then fuzzy match for reverse-domain WM_CLASS
+				// (e.g., "com.mitchellh.ghostty" matching pending slot "ghostty").
+				matchedClass := class
+				slots := pendingSlotsByClass[matchedClass]
+				if len(slots) == 0 {
+					for pendingClass, pendingSlots := range pendingSlotsByClass {
+						if len(pendingSlots) > 0 && wmClassesMatch(class, pendingClass) {
+							matchedClass = pendingClass
+							slots = pendingSlots
+							break
+						}
+					}
+				}
 				if len(slots) == 0 {
 					if debugf != nil {
 						debugf("  ignoring unmatched window_id=%d wm_class=%q (no pending slot)", w.WindowID, w.WMClass)
@@ -428,7 +469,7 @@ func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, te
 				}
 
 				slotIdx := slots[0]
-				pendingSlotsByClass[class] = slots[1:]
+				pendingSlotsByClass[matchedClass] = slots[1:]
 				windowIDsBySlot[slotIdx] = w.WindowID
 				assigned++
 				if debugf != nil {
@@ -467,6 +508,26 @@ func waitForNewTerminals(lister TerminalLister, existing map[uint32]struct{}, te
 
 func normalizedWMClass(class string) string {
 	return strings.ToLower(strings.TrimSpace(class))
+}
+
+// wmClassesMatch checks whether two normalized WM_CLASS values refer to the same
+// terminal. Handles cases like "ghostty" vs "com.mitchellh.ghostty" where the
+// actual X11 WM_CLASS uses a reverse-domain-name format but the config uses the
+// short name.
+func wmClassesMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	// Check if either class is the final dot-separated component of the other.
+	// e.g., "ghostty" matches "com.mitchellh.ghostty" because "ghostty" is the
+	// last segment of the dot-separated name.
+	if i := strings.LastIndex(a, "."); i >= 0 && a[i+1:] == b {
+		return true
+	}
+	if i := strings.LastIndex(b, "."); i >= 0 && b[i+1:] == a {
+		return true
+	}
+	return false
 }
 
 func matchWindowsByTitle(workspaceName string, terms []TerminalConfig, windowIDs []uint32, titleForWindow func(uint32) (string, error), timeout time.Duration, debugf func(string, ...any)) ([]uint32, string, bool) {

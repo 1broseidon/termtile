@@ -44,6 +44,9 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 	if raw.UndoHotkey != nil {
 		cfg.UndoHotkey = *raw.UndoHotkey
 	}
+	if raw.TerminalAddHotkey != nil {
+		cfg.TerminalAddHotkey = *raw.TerminalAddHotkey
+	}
 	if raw.PaletteHotkey != nil {
 		cfg.PaletteHotkey = *raw.PaletteHotkey
 	}
@@ -52,6 +55,12 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 	}
 	if raw.PaletteFuzzyMatching != nil {
 		cfg.PaletteFuzzyMatching = *raw.PaletteFuzzyMatching
+	}
+	if raw.Display != nil {
+		cfg.Display = *raw.Display
+	}
+	if raw.XAuthority != nil {
+		cfg.XAuthority = *raw.XAuthority
 	}
 	if raw.PreferredTerminal != nil {
 		cfg.PreferredTerminal = *raw.PreferredTerminal
@@ -148,6 +157,12 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 		}
 	}
 
+	if raw.AgentMode != nil {
+		if raw.AgentMode.ProtectSlotZero != nil {
+			cfg.AgentMode.ProtectSlotZero = raw.AgentMode.ProtectSlotZero
+		}
+	}
+
 	if raw.Agents != nil {
 		if cfg.Agents == nil {
 			cfg.Agents = make(map[string]AgentConfig, len(raw.Agents))
@@ -193,6 +208,15 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 	if cfg.DefaultLayout == "" {
 		cfg.DefaultLayout = DefaultBuiltinLayout
 	}
+	if raw.ProjectWorkspace != nil {
+		projectCfg, err := buildEffectiveProjectWorkspaceConfig(*raw.ProjectWorkspace)
+		if err != nil {
+			return nil, nil, err
+		}
+		applyProjectWorkspaceOverrides(cfg, projectCfg)
+		cfg.ProjectWorkspace = &projectCfg
+		applyAgentDefaults(cfg.Agents)
+	}
 	if _, err := cfg.GetLayout(cfg.DefaultLayout); err != nil {
 		return nil, nil, &ValidationError{Path: "default_layout", Err: err}
 	}
@@ -222,6 +246,299 @@ func applyAgentDefaults(agents map[string]AgentConfig) {
 		}
 		agents[name] = agentCfg
 	}
+}
+
+func buildEffectiveProjectWorkspaceConfig(raw RawProjectWorkspaceConfig) (ProjectWorkspaceConfig, error) {
+	out := DefaultProjectWorkspaceConfig()
+
+	if raw.Version != nil {
+		out.Version = *raw.Version
+	}
+	if out.Version != ProjectWorkspaceSchemaVersion {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.version",
+			Err:  fmt.Errorf("version must be %d", ProjectWorkspaceSchemaVersion),
+		}
+	}
+
+	if raw.Workspace != nil {
+		out.Workspace = strings.TrimSpace(*raw.Workspace)
+	}
+	if out.Workspace == "" {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.workspace",
+			Err:  fmt.Errorf("workspace is required"),
+		}
+	}
+
+	if raw.Project != nil {
+		if raw.Project.RootMarker != nil {
+			out.Project.RootMarker = strings.TrimSpace(*raw.Project.RootMarker)
+		}
+		if raw.Project.CWDMode != nil {
+			out.Project.CWDMode = ProjectCWDMode(strings.TrimSpace(*raw.Project.CWDMode))
+		}
+		if raw.Project.CWD != nil {
+			out.Project.CWD = strings.TrimSpace(*raw.Project.CWD)
+		}
+	}
+	if out.Project.RootMarker == "" {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.project.root_marker",
+			Err:  fmt.Errorf("root_marker is required"),
+		}
+	}
+	switch out.Project.CWDMode {
+	case ProjectCWDModeProjectRoot, ProjectCWDModeWorkspaceSave, ProjectCWDModeExplicit:
+	default:
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.project.cwd_mode",
+			Err:  fmt.Errorf("cwd_mode must be one of: project_root, workspace_saved, explicit"),
+		}
+	}
+	if out.Project.CWDMode == ProjectCWDModeExplicit && out.Project.CWD == "" {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.project.cwd",
+			Err:  fmt.Errorf("cwd is required when cwd_mode=explicit"),
+		}
+	}
+
+	if raw.MCP != nil {
+		if raw.MCP.Spawn != nil {
+			if raw.MCP.Spawn.RequireExplicitWorkspace != nil {
+				out.MCP.Spawn.RequireExplicitWorkspace = *raw.MCP.Spawn.RequireExplicitWorkspace
+			}
+			if raw.MCP.Spawn.ResolutionOrder != nil {
+				out.MCP.Spawn.ResolutionOrder = append([]string(nil), raw.MCP.Spawn.ResolutionOrder...)
+			}
+		}
+		if raw.MCP.Read != nil {
+			if raw.MCP.Read.DefaultLines != nil {
+				out.MCP.Read.DefaultLines = *raw.MCP.Read.DefaultLines
+			}
+			if raw.MCP.Read.MaxLines != nil {
+				out.MCP.Read.MaxLines = *raw.MCP.Read.MaxLines
+			}
+			if raw.MCP.Read.SinceLastDefault != nil {
+				out.MCP.Read.SinceLastDefault = *raw.MCP.Read.SinceLastDefault
+			}
+		}
+	}
+	if len(out.MCP.Spawn.ResolutionOrder) == 0 {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.mcp.spawn.resolution_order",
+			Err:  fmt.Errorf("resolution_order must not be empty"),
+		}
+	}
+	allowedResolutionOrder := map[string]struct{}{
+		"explicit_arg":                      {},
+		"source_workspace_hint":             {},
+		"project_marker":                    {},
+		"single_registered_agent_workspace": {},
+		"error":                             {},
+	}
+	for _, step := range out.MCP.Spawn.ResolutionOrder {
+		if _, ok := allowedResolutionOrder[step]; !ok {
+			return ProjectWorkspaceConfig{}, &ValidationError{
+				Path: "project_workspace.mcp.spawn.resolution_order",
+				Err:  fmt.Errorf("unsupported resolution_order step %q", step),
+			}
+		}
+	}
+	if out.MCP.Read.DefaultLines <= 0 || out.MCP.Read.DefaultLines > 100 {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.mcp.read.default_lines",
+			Err:  fmt.Errorf("default_lines must be between 1 and 100"),
+		}
+	}
+	if out.MCP.Read.MaxLines <= 0 || out.MCP.Read.MaxLines > 100 {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.mcp.read.max_lines",
+			Err:  fmt.Errorf("max_lines must be between 1 and 100"),
+		}
+	}
+	if out.MCP.Read.DefaultLines > out.MCP.Read.MaxLines {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.mcp.read.default_lines",
+			Err:  fmt.Errorf("default_lines must be <= max_lines"),
+		}
+	}
+
+	if raw.Agents != nil {
+		if raw.Agents.Defaults != nil {
+			if raw.Agents.Defaults.SpawnMode != nil {
+				out.Agents.Defaults.SpawnMode = strings.TrimSpace(*raw.Agents.Defaults.SpawnMode)
+			}
+			if raw.Agents.Defaults.Model != nil {
+				out.Agents.Defaults.Model = strings.TrimSpace(*raw.Agents.Defaults.Model)
+			}
+			if raw.Agents.Defaults.Env != nil {
+				out.Agents.Defaults.Env = mergeStringMap(out.Agents.Defaults.Env, raw.Agents.Defaults.Env)
+			}
+		}
+		if raw.Agents.Overrides != nil {
+			if out.Agents.Overrides == nil {
+				out.Agents.Overrides = map[string]ProjectWorkspaceAgentOverride{}
+			}
+			for name, override := range raw.Agents.Overrides {
+				current := out.Agents.Overrides[name]
+				if override.SpawnMode != nil {
+					current.SpawnMode = strings.TrimSpace(*override.SpawnMode)
+				}
+				if override.Model != nil {
+					current.Model = strings.TrimSpace(*override.Model)
+				}
+				if override.Env != nil {
+					current.Env = mergeStringMap(current.Env, override.Env)
+				}
+				out.Agents.Overrides[name] = current
+			}
+		}
+	}
+	if err := validateProjectAgentSpawnMode("project_workspace.agents.defaults.spawn_mode", out.Agents.Defaults.SpawnMode); err != nil {
+		return ProjectWorkspaceConfig{}, err
+	}
+	for name, override := range out.Agents.Overrides {
+		if err := validateProjectAgentSpawnMode("project_workspace.agents.overrides."+name+".spawn_mode", override.SpawnMode); err != nil {
+			return ProjectWorkspaceConfig{}, err
+		}
+	}
+
+	if raw.WorkspaceOverrides != nil {
+		if raw.WorkspaceOverrides.Layout != nil {
+			out.WorkspaceOverrides.Layout = strings.TrimSpace(*raw.WorkspaceOverrides.Layout)
+		}
+		if raw.WorkspaceOverrides.Terminal != nil {
+			out.WorkspaceOverrides.Terminal = strings.TrimSpace(*raw.WorkspaceOverrides.Terminal)
+		}
+		if raw.WorkspaceOverrides.TerminalSpawnCommand != nil {
+			out.WorkspaceOverrides.TerminalSpawnCommand = strings.TrimSpace(*raw.WorkspaceOverrides.TerminalSpawnCommand)
+		}
+	}
+
+	if raw.Sync != nil {
+		if raw.Sync.Mode != nil {
+			out.Sync.Mode = ProjectSyncMode(strings.TrimSpace(*raw.Sync.Mode))
+		}
+		if raw.Sync.PullOnWorkspaceLoad != nil {
+			out.Sync.PullOnWorkspaceLoad = *raw.Sync.PullOnWorkspaceLoad
+		}
+		if raw.Sync.PushOnWorkspaceSave != nil {
+			out.Sync.PushOnWorkspaceSave = *raw.Sync.PushOnWorkspaceSave
+		}
+		if raw.Sync.Include != nil {
+			out.Sync.Include = append([]string(nil), raw.Sync.Include...)
+		}
+	}
+	switch out.Sync.Mode {
+	case ProjectSyncModeLinked, ProjectSyncModeDetached:
+	default:
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.sync.mode",
+			Err:  fmt.Errorf("mode must be one of: linked, detached"),
+		}
+	}
+	if len(out.Sync.Include) == 0 {
+		return ProjectWorkspaceConfig{}, &ValidationError{
+			Path: "project_workspace.sync.include",
+			Err:  fmt.Errorf("include must not be empty"),
+		}
+	}
+	allowedSyncInclude := map[string]struct{}{
+		"layout":     {},
+		"terminals":  {},
+		"agent_mode": {},
+	}
+	for _, field := range out.Sync.Include {
+		if _, ok := allowedSyncInclude[field]; !ok {
+			return ProjectWorkspaceConfig{}, &ValidationError{
+				Path: "project_workspace.sync.include",
+				Err:  fmt.Errorf("unsupported include field %q", field),
+			}
+		}
+	}
+
+	return out, nil
+}
+
+func applyProjectWorkspaceOverrides(cfg *Config, projectCfg ProjectWorkspaceConfig) {
+	if cfg == nil {
+		return
+	}
+
+	if layout := strings.TrimSpace(projectCfg.WorkspaceOverrides.Layout); layout != "" {
+		cfg.DefaultLayout = layout
+	}
+	if terminal := strings.TrimSpace(projectCfg.WorkspaceOverrides.Terminal); terminal != "" {
+		cfg.PreferredTerminal = terminal
+	}
+	if cmd := strings.TrimSpace(projectCfg.WorkspaceOverrides.TerminalSpawnCommand); cmd != "" {
+		terminalClass := strings.TrimSpace(projectCfg.WorkspaceOverrides.Terminal)
+		if terminalClass == "" {
+			terminalClass = strings.TrimSpace(cfg.PreferredTerminal)
+		}
+		if terminalClass != "" {
+			if cfg.TerminalSpawnCommands == nil {
+				cfg.TerminalSpawnCommands = make(map[string]string)
+			}
+			cfg.TerminalSpawnCommands[terminalClass] = cmd
+		}
+	}
+
+	for name, agentCfg := range cfg.Agents {
+		if spawnMode := strings.TrimSpace(projectCfg.Agents.Defaults.SpawnMode); spawnMode != "" {
+			agentCfg.SpawnMode = spawnMode
+		}
+		if model := strings.TrimSpace(projectCfg.Agents.Defaults.Model); model != "" {
+			agentCfg.DefaultModel = model
+		}
+		agentCfg.Env = mergeStringMap(agentCfg.Env, projectCfg.Agents.Defaults.Env)
+		cfg.Agents[name] = agentCfg
+	}
+
+	for name, override := range projectCfg.Agents.Overrides {
+		agentCfg, ok := cfg.Agents[name]
+		if !ok {
+			continue
+		}
+		if spawnMode := strings.TrimSpace(override.SpawnMode); spawnMode != "" {
+			agentCfg.SpawnMode = spawnMode
+		}
+		if model := strings.TrimSpace(override.Model); model != "" {
+			agentCfg.DefaultModel = model
+		}
+		agentCfg.Env = mergeStringMap(agentCfg.Env, override.Env)
+		cfg.Agents[name] = agentCfg
+	}
+}
+
+func validateProjectAgentSpawnMode(path string, mode string) error {
+	if strings.TrimSpace(mode) == "" {
+		return nil
+	}
+	switch mode {
+	case "pane", "window":
+		return nil
+	default:
+		return &ValidationError{
+			Path: path,
+			Err:  fmt.Errorf("spawn_mode must be one of: pane, window"),
+		}
+	}
+}
+
+func mergeStringMap(base map[string]string, overlay map[string]string) map[string]string {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range overlay {
+		out[key] = value
+	}
+	return out
 }
 
 func applyLayouts(cfg *Config, raw RawConfig) (map[string]string, error) {

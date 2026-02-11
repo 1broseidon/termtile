@@ -7,8 +7,10 @@ import (
 	"html"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/1broseidon/termtile/internal/agent"
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/ipc"
 	"github.com/1broseidon/termtile/internal/palette"
@@ -29,6 +31,7 @@ func runPalette(args []string) int {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Menu options:")
 		fmt.Fprintln(os.Stderr, "  Workspaces - Load, save, or close workspace sessions")
+		fmt.Fprintln(os.Stderr, "  Terminals  - Focus, move, or close workspace terminals")
 		fmt.Fprintln(os.Stderr, "  Layouts    - Switch between tiling layouts")
 		fmt.Fprintln(os.Stderr, "  Settings   - Quick settings toggles")
 		fmt.Fprintln(os.Stderr, "")
@@ -135,6 +138,11 @@ func buildRootMenu(cfg *config.Config) []palette.MenuItem {
 			Label:   "Workspaces",
 			Icon:    "folder-open",
 			Submenu: buildWorkspacesMenu(),
+		},
+		{
+			Label:   "Terminals",
+			Icon:    "utilities-terminal",
+			Submenu: buildTerminalsMenu(),
 		},
 		{
 			Label:   "Layouts",
@@ -473,6 +481,31 @@ func executePrimaryAction(action string, tileNow bool) int {
 			status.ActiveLayout, status.TerminalCount, status.UptimeSeconds)
 		return 0
 
+	case strings.HasPrefix(action, "terminal:focus:"):
+		slot, err := strconv.Atoi(strings.TrimPrefix(action, "terminal:focus:"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "palette: invalid slot in %q\n", action)
+			return 1
+		}
+		return focusTerminalBySlot(slot)
+
+	case action == "terminal:add":
+		return runTerminal([]string{"add"})
+
+	case strings.HasPrefix(action, "terminal:close:"):
+		slot := strings.TrimPrefix(action, "terminal:close:")
+		return runTerminal([]string{"remove", "--slot", slot, "--force"})
+
+	case strings.HasPrefix(action, "terminal:move:"):
+		// Format: terminal:move:SLOT:WORKSPACE
+		rest := strings.TrimPrefix(action, "terminal:move:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			fmt.Fprintf(os.Stderr, "palette: invalid move action %q\n", action)
+			return 1
+		}
+		return runTerminal([]string{"move", "--slot", parts[0], "--to", parts[1]})
+
 	default:
 		fmt.Fprintf(os.Stderr, "palette: unknown action %q\n", action)
 		return 1
@@ -494,6 +527,14 @@ func executeSecondaryAction(action string) int {
 		fmt.Printf("Edit layout %q (not yet implemented)\n", layoutName)
 		return 0
 
+	case strings.HasPrefix(action, "terminal:focus:"):
+		slot, err := strconv.Atoi(strings.TrimPrefix(action, "terminal:focus:"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "palette: invalid slot in %q\n", action)
+			return 1
+		}
+		return showTerminalActionsMenu(slot)
+
 	default:
 		// Fall back to primary action
 		return executePrimaryAction(action, true)
@@ -508,8 +549,190 @@ func executeDeleteAction(action string) int {
 		wsName := strings.TrimPrefix(action, "workspace:load:")
 		return runWorkspace([]string{"delete", wsName})
 
+	case strings.HasPrefix(action, "terminal:focus:"):
+		slot := strings.TrimPrefix(action, "terminal:focus:")
+		return runTerminal([]string{"remove", "--slot", slot, "--force"})
+
 	default:
 		fmt.Fprintf(os.Stderr, "palette: delete not supported for action %q\n", action)
 		return 1
 	}
+}
+
+func buildTerminalsMenu() []palette.MenuItem {
+	wsInfo, err := workspace.GetActiveWorkspace()
+	if err != nil || wsInfo.Name == "" {
+		return []palette.MenuItem{
+			{
+				Label:    "(no active workspace)",
+				Action:   "noop",
+				Icon:     "dialog-information",
+				IsHeader: true,
+			},
+		}
+	}
+
+	var items []palette.MenuItem
+	for i := 0; i < wsInfo.TerminalCount; i++ {
+		label, icon := terminalSlotLabel(wsInfo, i)
+		items = append(items, palette.MenuItem{
+			Label:  label,
+			Action: fmt.Sprintf("terminal:focus:%d", i),
+			Icon:   icon,
+			Meta:   fmt.Sprintf("terminal slot %d focus raise", i),
+		})
+	}
+
+	items = append(items, palette.MenuItem{
+		Label:     "────────────────",
+		Action:    "noop",
+		IsDivider: true,
+	})
+	items = append(items, palette.MenuItem{
+		Label:  "+ New terminal",
+		Action: "terminal:add",
+		Icon:   "list-add",
+		Meta:   "add new terminal spawn",
+	})
+
+	return items
+}
+
+func terminalSlotLabel(wsInfo workspace.WorkspaceInfo, slot int) (string, string) {
+	if !wsInfo.AgentMode {
+		return fmt.Sprintf("[%d] terminal", slot), "utilities-terminal"
+	}
+
+	sessionName := agent.SessionName(wsInfo.Name, slot)
+	status, err := agent.GetSessionStatus(sessionName)
+	if err != nil || !status.Exists {
+		return fmt.Sprintf("[%d] terminal", slot), "utilities-terminal"
+	}
+
+	state := "idle"
+	if !status.IsIdle {
+		state = "busy"
+	}
+	cmd := status.CurrentCommand
+	if cmd == "" {
+		cmd = "agent"
+	}
+	return fmt.Sprintf("[%d] %s (%s)", slot, cmd, state), "utilities-terminal"
+}
+
+func focusTerminalBySlot(slot int) int {
+	wsInfo, err := workspace.GetActiveWorkspace()
+	if err != nil || wsInfo.Name == "" {
+		fmt.Fprintln(os.Stderr, "palette: no active workspace")
+		return 1
+	}
+
+	slots, err := workspace.GetSlotsByDesktop(wsInfo.Desktop)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "palette: failed to get slots:", err)
+		return 1
+	}
+
+	// Find the slot by index and focus its window
+	for _, s := range slots {
+		if s.SlotIndex == slot {
+			if err := platform.FocusWindowStandalone(s.WindowID); err != nil {
+				fmt.Fprintln(os.Stderr, "palette: failed to focus window:", err)
+				return 1
+			}
+			return 0
+		}
+	}
+
+	// Fallback for agent-mode: find window by tmux session title
+	if wsInfo.AgentMode {
+		sessionName := agent.SessionName(wsInfo.Name, slot)
+		windowID, err := platform.FindWindowByTitleStandalone(sessionName)
+		if err == nil {
+			if err := platform.FocusWindowStandalone(windowID); err != nil {
+				fmt.Fprintln(os.Stderr, "palette: failed to focus window:", err)
+				return 1
+			}
+			return 0
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "palette: slot %d not found\n", slot)
+	return 1
+}
+
+func showTerminalActionsMenu(slot int) int {
+	wsInfo, err := workspace.GetActiveWorkspace()
+	if err != nil || wsInfo.Name == "" {
+		fmt.Fprintln(os.Stderr, "palette: no active workspace")
+		return 1
+	}
+
+	// Build menu items: move destinations + close
+	var items []palette.MenuItem
+
+	// Get all workspaces to offer as move destinations
+	allWorkspaces, err := workspace.GetAllWorkspaces()
+	if err == nil {
+		var desktops []int
+		for d := range allWorkspaces {
+			if d != wsInfo.Desktop {
+				desktops = append(desktops, d)
+			}
+		}
+		sort.Ints(desktops)
+
+		for _, d := range desktops {
+			ws := allWorkspaces[d]
+			label := fmt.Sprintf("Move to %s (Desktop %d)", ws.Name, d)
+			items = append(items, palette.MenuItem{
+				Label:  label,
+				Action: fmt.Sprintf("terminal:move:%d:%s", slot, ws.Name),
+				Icon:   "go-next",
+				Meta:   fmt.Sprintf("move terminal slot %d to %s", slot, ws.Name),
+			})
+		}
+	}
+
+	items = append(items, palette.MenuItem{
+		Label:     "────────────────",
+		Action:    "noop",
+		IsDivider: true,
+	})
+	items = append(items, palette.MenuItem{
+		Label:  "Close terminal",
+		Action: fmt.Sprintf("terminal:close:%d", slot),
+		Icon:   "window-close",
+		Meta:   fmt.Sprintf("close remove terminal slot %d", slot),
+	})
+
+	// Load config for palette backend
+	res, err := config.LoadWithSources()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	backend, err := palette.NewBackend(res.Config.PaletteBackend)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if setter, ok := backend.(interface{ SetFuzzyMatching(bool) }); ok {
+		setter.SetFuzzyMatching(res.Config.PaletteFuzzyMatching)
+	}
+
+	menu := palette.NewMenu(backend, items)
+	menu.SetMessage(fmt.Sprintf("Terminal [%d] actions", slot))
+
+	result, err := menu.Show()
+	if err != nil {
+		if errors.Is(err, palette.ErrCancelled) {
+			return 0
+		}
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	return executePrimaryAction(result.Action, true)
 }

@@ -6,6 +6,50 @@ termtile uses a YAML-based configuration system that supports inheritance, inclu
 
 The default configuration file is located at `~/.config/termtile/config.yaml`.
 
+## Project Workspace Configuration (v1)
+
+termtile also supports project-local workspace settings:
+
+- `.termtile/workspace.yaml` (committed): project workspace binding and defaults
+- `.termtile/local.yaml` (gitignored): local pull/push sync snapshot
+- `~/.config/termtile/workspaces/<workspace>.json`: canonical workspace snapshot
+
+Initialize a project file:
+
+```bash
+termtile workspace init --workspace my-workspace
+```
+
+Update only the project workspace binding:
+
+```bash
+termtile workspace link --workspace my-workspace
+```
+
+Sync selected fields between project-local and canonical snapshots:
+
+```bash
+termtile workspace sync pull
+termtile workspace sync push
+```
+
+Default synced fields are:
+
+- `layout`
+- `terminals`
+- `agent_mode`
+
+### Precedence
+
+Resolver and config precedence for workspace selection/overrides:
+
+1. CLI/tool explicit args
+2. Request-scoped hints (for example `source_workspace`)
+3. `.termtile/local.yaml`
+4. `.termtile/workspace.yaml`
+5. `~/.config/termtile/config.yaml`
+6. Built-in defaults
+
 ### Include Directives
 You can split your configuration into multiple files using the `include` key. This supports single files or entire directories.
 ```yaml
@@ -26,6 +70,8 @@ include:
 | `default_layout` | string | Layout applied on daemon startup. |
 | `terminal_sort` | string | Order of windows: `position`, `window_id`, `client_list`, `active_first`. |
 | `log_level` | string | `debug`, `info`, `warning`, `error`. |
+| `display` | string | Optional X11 display override for window-mode agent spawns (e.g. `:1`). |
+| `xauthority` | string | Optional Xauthority path override used with `display` for window-mode spawns. |
 
 ## Hotkeys
 
@@ -36,9 +82,20 @@ Modifiers: `Mod4` (Super), `Mod1` (Alt), `Control`, `Shift`.
 hotkey: "Mod4-Mod1-t"
 cycle_layout_hotkey: "Mod4-Mod1-bracketright"
 undo_hotkey: "Mod4-Mod1-u"
-move_mode_hotkey: "Mod4-Mod1-m"
+move_mode_hotkey: "Mod4-Mod1-r"
+terminal_add_hotkey: "Mod4-Mod1-n"
 palette_hotkey: "Mod4-Mod1-g"
 ```
+
+### Move Mode Interaction
+
+`move_mode_hotkey` enters a phase-based interaction model and shows a compact on-screen key legend:
+
+- `select`: cycle terminals (`Arrow keys`), grab (`Enter`), request delete (`d`), insert after (`n`), append (`a`), cancel (`Esc`)
+- `move`: after grabbing, pick a target slot (`Arrow keys`) and confirm move/swap (`Enter`)
+- `confirm-delete`: confirm deletion (`Enter`) or cancel and return to select (`Esc`)
+
+If text rendering is unavailable in the current environment, Move Mode keeps the border overlays and continues without the text panel.
 
 ## Terminal Detection
 

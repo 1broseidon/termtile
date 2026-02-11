@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/ewmh"
 	"github.com/BurntSushi/xgbutil/icccm"
+	"gopkg.in/yaml.v3"
 )
 
 // logWorkspaceAction logs a workspace action using the shared terminal logger.
@@ -146,8 +150,9 @@ func runWorkspace(args []string) int {
 		fmt.Fprintln(os.Stderr, "  termtile workspace list                   List saved workspaces")
 		fmt.Fprintln(os.Stderr, "  termtile workspace delete <name>          Delete a saved workspace")
 		fmt.Fprintln(os.Stderr, "  termtile workspace rename <old> <new>     Rename a workspace")
-		fmt.Fprintln(os.Stderr, "  termtile workspace add-terminal [flags]   Add a terminal to active workspace")
-		fmt.Fprintln(os.Stderr, "  termtile workspace remove-terminal [flags] Remove a terminal from active workspace")
+		fmt.Fprintln(os.Stderr, "  termtile workspace init --workspace <name> Initialize project workspace config")
+		fmt.Fprintln(os.Stderr, "  termtile workspace link --workspace <name> Link project to a canonical workspace")
+		fmt.Fprintln(os.Stderr, "  termtile workspace sync pull|push          Sync project view pull/push")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Run 'termtile workspace <command> --help' for command-specific options.")
 		return 2
@@ -577,6 +582,12 @@ func runWorkspace(args []string) int {
 
 	case "rename":
 		return runWorkspaceRename(args[1:])
+	case "init":
+		return runProjectInit(args[1:])
+	case "link":
+		return runProjectLink(args[1:])
+	case "sync":
+		return runProjectSync(args[1:])
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown workspace subcommand: %s\n", args[0])
@@ -584,6 +595,556 @@ func runWorkspace(args []string) int {
 	}
 }
 
+const (
+	projectDirName          = ".termtile"
+	projectWorkspaceCfgFile = "workspace.yaml"
+	projectLocalCfgFile     = "local.yaml"
+)
+
+var projectSyncAllowedFields = map[string]struct{}{
+	"layout":     {},
+	"terminals":  {},
+	"agent_mode": {},
+}
+
+type projectWorkspaceConfig struct {
+	Version            int                       `yaml:"version"`
+	Workspace          string                    `yaml:"workspace"`
+	Project            projectSettings           `yaml:"project"`
+	MCP                projectMCPSettings        `yaml:"mcp"`
+	Agents             projectAgentsSettings     `yaml:"agents"`
+	WorkspaceOverrides projectWorkspaceOverrides `yaml:"workspace_overrides"`
+	Sync               projectSyncSettings       `yaml:"sync"`
+}
+
+type projectSettings struct {
+	RootMarker string  `yaml:"root_marker"`
+	CwdMode    string  `yaml:"cwd_mode"`
+	Cwd        *string `yaml:"cwd"`
+}
+
+type projectMCPSettings struct {
+	Spawn projectMCPSpawn `yaml:"spawn"`
+	Read  projectMCPRead  `yaml:"read"`
+}
+
+type projectMCPSpawn struct {
+	RequireExplicitWorkspace bool     `yaml:"require_explicit_workspace"`
+	ResolutionOrder          []string `yaml:"resolution_order"`
+}
+
+type projectMCPRead struct {
+	DefaultLines     int  `yaml:"default_lines"`
+	MaxLines         int  `yaml:"max_lines"`
+	SinceLastDefault bool `yaml:"since_last_default"`
+}
+
+type projectAgentsSettings struct {
+	Defaults  projectAgentDefaults             `yaml:"defaults"`
+	Overrides map[string]projectAgentOverrides `yaml:"overrides"`
+}
+
+type projectAgentDefaults struct {
+	SpawnMode string            `yaml:"spawn_mode"`
+	Model     *string           `yaml:"model"`
+	Env       map[string]string `yaml:"env"`
+}
+
+type projectAgentOverrides struct {
+	Model *string           `yaml:"model"`
+	Env   map[string]string `yaml:"env"`
+}
+
+type projectWorkspaceOverrides struct {
+	Layout               any `yaml:"layout"`
+	Terminal             any `yaml:"terminal"`
+	TerminalSpawnCommand any `yaml:"terminal_spawn_command"`
+}
+
+type projectSyncSettings struct {
+	Mode                string   `yaml:"mode"`
+	PullOnWorkspaceLoad bool     `yaml:"pull_on_workspace_load"`
+	PushOnWorkspaceSave bool     `yaml:"push_on_workspace_save"`
+	Include             []string `yaml:"include"`
+}
+
+type projectLocalConfig struct {
+	Version   int                      `yaml:"version"`
+	Workspace string                   `yaml:"workspace"`
+	Snapshot  projectWorkspaceSnapshot `yaml:"snapshot"`
+}
+
+type projectWorkspaceSnapshot struct {
+	Layout    *string                     `yaml:"layout,omitempty"`
+	Terminals *[]workspace.TerminalConfig `yaml:"terminals,omitempty"`
+	AgentMode *bool                       `yaml:"agent_mode,omitempty"`
+}
+
+func runProjectInit(args []string) int {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	workspaceName := fs.String("workspace", "", "Canonical workspace name to link to")
+	force := fs.Bool("force", false, "Overwrite existing .termtile/workspace.yaml")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: termtile workspace init --workspace <name> [--force]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Create .termtile/workspace.yaml with schema v1 defaults.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Flags:")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "workspace init takes no positional arguments")
+		fs.Usage()
+		return 2
+	}
+	if strings.TrimSpace(*workspaceName) == "" {
+		fmt.Fprintln(os.Stderr, "workspace init requires --workspace")
+		fs.Usage()
+		return 2
+	}
+	if err := workspace.ValidateWorkspaceName(*workspaceName); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	root, err := resolveProjectRootForInit()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	projectDir := filepath.Join(root, projectDirName)
+	projectCfgPath := filepath.Join(projectDir, projectWorkspaceCfgFile)
+
+	if _, err := os.Stat(projectCfgPath); err == nil && !*force {
+		fmt.Fprintf(os.Stderr, "%s already exists (use --force to overwrite)\n", projectCfgPath)
+		return 1
+	}
+
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	cfg := defaultProjectWorkspaceConfig(*workspaceName)
+	if err := writeProjectWorkspaceConfig(projectCfgPath, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := ensureProjectGitignore(projectDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	fmt.Printf("Initialized %s\n", projectCfgPath)
+	return 0
+}
+
+func runProjectLink(args []string) int {
+	fs := flag.NewFlagSet("link", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	workspaceName := fs.String("workspace", "", "Canonical workspace name to link to")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: termtile workspace link --workspace <name>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Update only the workspace binding in .termtile/workspace.yaml.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Flags:")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "workspace link takes no positional arguments")
+		fs.Usage()
+		return 2
+	}
+	if strings.TrimSpace(*workspaceName) == "" {
+		fmt.Fprintln(os.Stderr, "workspace link requires --workspace")
+		fs.Usage()
+		return 2
+	}
+	if err := workspace.ValidateWorkspaceName(*workspaceName); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	cfgPath, err := findProjectWorkspaceConfigPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	cfg, err := readProjectWorkspaceConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	cfg.Workspace = *workspaceName
+	if err := writeProjectWorkspaceConfig(cfgPath, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	fmt.Printf("Linked project to workspace %q\n", *workspaceName)
+	return 0
+}
+
+func runProjectSync(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "workspace sync requires pull or push")
+		return 2
+	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprintln(os.Stdout, "Usage: termtile workspace sync pull|push")
+		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "workspace sync takes only one positional argument: pull|push")
+		return 2
+	}
+
+	cfgPath, err := findProjectWorkspaceConfigPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	projectCfg, err := readProjectWorkspaceConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if strings.TrimSpace(projectCfg.Workspace) == "" {
+		fmt.Fprintf(os.Stderr, "%s is missing workspace binding\n", cfgPath)
+		return 1
+	}
+
+	include, err := normalizeProjectSyncInclude(projectCfg.Sync.Include)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	projectDir := filepath.Dir(cfgPath)
+	localCfgPath := filepath.Join(projectDir, projectLocalCfgFile)
+
+	switch args[0] {
+	case "pull":
+		if err := projectSyncPull(projectCfg.Workspace, include, localCfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Printf("Pulled %s from workspace %q into %s\n", strings.Join(include, ", "), projectCfg.Workspace, localCfgPath)
+		return 0
+	case "push":
+		if err := projectSyncPush(projectCfg.Workspace, include, localCfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Printf("Pushed %s from %s to workspace %q\n", strings.Join(include, ", "), localCfgPath, projectCfg.Workspace)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown sync mode %q (expected pull or push)\n", args[0])
+		return 2
+	}
+}
+
+func normalizeProjectSyncInclude(include []string) ([]string, error) {
+	if len(include) == 0 {
+		return []string{"layout", "terminals", "agent_mode"}, nil
+	}
+	out := make([]string, 0, len(include))
+	seen := make(map[string]struct{}, len(include))
+	for _, v := range include {
+		key := strings.TrimSpace(v)
+		if key == "" {
+			continue
+		}
+		if _, ok := projectSyncAllowedFields[key]; !ok {
+			return nil, fmt.Errorf("unsupported sync.include field %q", key)
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("sync.include is empty")
+	}
+	return out, nil
+}
+
+func projectSyncPull(workspaceName string, include []string, localCfgPath string) error {
+	ws, err := workspace.Read(workspaceName)
+	if err != nil {
+		return err
+	}
+	localCfg, err := readProjectLocalConfig(localCfgPath)
+	if err != nil {
+		return err
+	}
+	localCfg.Version = 1
+	localCfg.Workspace = workspaceName
+
+	for _, field := range include {
+		switch field {
+		case "layout":
+			layout := ws.Layout
+			localCfg.Snapshot.Layout = &layout
+		case "terminals":
+			terms := make([]workspace.TerminalConfig, len(ws.Terminals))
+			copy(terms, ws.Terminals)
+			localCfg.Snapshot.Terminals = &terms
+		case "agent_mode":
+			agentMode := ws.AgentMode
+			localCfg.Snapshot.AgentMode = &agentMode
+		}
+	}
+
+	return writeProjectLocalConfig(localCfgPath, localCfg)
+}
+
+func projectSyncPush(workspaceName string, include []string, localCfgPath string) error {
+	localCfg, err := readProjectLocalConfig(localCfgPath)
+	if err != nil {
+		return err
+	}
+	ws, err := workspace.Read(workspaceName)
+	if err != nil {
+		return err
+	}
+
+	for _, field := range include {
+		switch field {
+		case "layout":
+			if localCfg.Snapshot.Layout == nil {
+				return fmt.Errorf("%s: snapshot.layout is required for push", localCfgPath)
+			}
+			ws.Layout = *localCfg.Snapshot.Layout
+		case "terminals":
+			if localCfg.Snapshot.Terminals == nil {
+				return fmt.Errorf("%s: snapshot.terminals is required for push", localCfgPath)
+			}
+			terms := make([]workspace.TerminalConfig, len(*localCfg.Snapshot.Terminals))
+			copy(terms, *localCfg.Snapshot.Terminals)
+			ws.Terminals = terms
+		case "agent_mode":
+			if localCfg.Snapshot.AgentMode == nil {
+				return fmt.Errorf("%s: snapshot.agent_mode is required for push", localCfgPath)
+			}
+			ws.AgentMode = *localCfg.Snapshot.AgentMode
+		}
+	}
+
+	return workspace.Write(ws)
+}
+
+func resolveProjectRootForInit() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return findProjectRootFrom(cwd), nil
+}
+
+func findProjectWorkspaceConfigPath() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	root := findProjectRootFrom(cwd)
+	path := filepath.Join(root, projectDirName, projectWorkspaceCfgFile)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("project config not found: %s (run 'termtile workspace init --workspace <name>')", path)
+		}
+		return "", err
+	}
+	return path, nil
+}
+
+func findProjectRootFrom(start string) string {
+	dir := start
+	for {
+		if exists(filepath.Join(dir, projectDirName, projectWorkspaceCfgFile)) {
+			return dir
+		}
+		if exists(filepath.Join(dir, ".git")) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return start
+		}
+		dir = parent
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func defaultProjectWorkspaceConfig(workspaceName string) *projectWorkspaceConfig {
+	return &projectWorkspaceConfig{
+		Version:   1,
+		Workspace: workspaceName,
+		Project: projectSettings{
+			RootMarker: ".git",
+			CwdMode:    "project_root",
+			Cwd:        nil,
+		},
+		MCP: projectMCPSettings{
+			Spawn: projectMCPSpawn{
+				RequireExplicitWorkspace: false,
+				ResolutionOrder: []string{
+					"explicit_arg",
+					"source_workspace_hint",
+					"project_marker",
+					"single_registered_agent_workspace",
+					"error",
+				},
+			},
+			Read: projectMCPRead{
+				DefaultLines:     50,
+				MaxLines:         100,
+				SinceLastDefault: false,
+			},
+		},
+		Agents: projectAgentsSettings{
+			Defaults: projectAgentDefaults{
+				SpawnMode: "window",
+				Model:     nil,
+				Env:       map[string]string{},
+			},
+			Overrides: map[string]projectAgentOverrides{
+				"codex": {
+					Model: stringPtr("gpt-5"),
+					Env: map[string]string{
+						"TERM": "xterm-256color",
+					},
+				},
+				"claude": {
+					Model: nil,
+					Env:   map[string]string{},
+				},
+			},
+		},
+		WorkspaceOverrides: projectWorkspaceOverrides{
+			Layout:               nil,
+			Terminal:             nil,
+			TerminalSpawnCommand: nil,
+		},
+		Sync: projectSyncSettings{
+			Mode:                "linked",
+			PullOnWorkspaceLoad: true,
+			PushOnWorkspaceSave: false,
+			Include: []string{
+				"layout",
+				"terminals",
+				"agent_mode",
+			},
+		},
+	}
+}
+
+func stringPtr(v string) *string {
+	return &v
+}
+
+func ensureProjectGitignore(projectDir string) error {
+	path := filepath.Join(projectDir, ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.WriteFile(path, []byte(projectLocalCfgFile+"\n"), 0644)
+		}
+		return err
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == projectLocalCfgFile {
+			return nil
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(string(data), "\n"))
+	if b.Len() > 0 {
+		b.WriteByte('\n')
+	}
+	b.WriteString(projectLocalCfgFile)
+	b.WriteByte('\n')
+	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+func readProjectWorkspaceConfig(path string) (*projectWorkspaceConfig, error) {
+	cfg := &projectWorkspaceConfig{}
+	if err := decodeStrictYAMLFile(path, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func writeProjectWorkspaceConfig(path string, cfg *projectWorkspaceConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("project workspace config is nil")
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func readProjectLocalConfig(path string) (*projectLocalConfig, error) {
+	cfg := &projectLocalConfig{Version: 1}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return nil, err
+	}
+	if err := decodeStrictYAMLFile(path, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func writeProjectLocalConfig(path string, cfg *projectLocalConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("project local config is nil")
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func decodeStrictYAMLFile(path string, out any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && err != io.EOF {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
 
 // closeWindowViaBackend closes a window using the platform backend.
 func closeWindowViaBackend(backend platform.Backend, windowID uint32) error {

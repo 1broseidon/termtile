@@ -8,13 +8,13 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/1broseidon/termtile/internal/config"
 	"github.com/1broseidon/termtile/internal/platform"
+	"github.com/1broseidon/termtile/internal/runtimepath"
 	"github.com/1broseidon/termtile/internal/tiling"
 )
 
@@ -34,15 +34,10 @@ type Server struct {
 
 // NewServer creates a new IPC server
 func NewServer(cfg *config.Config, tiler *tiling.Tiler, backend platform.Backend, reloadChan chan struct{}) (*Server, error) {
-	// Get user-specific socket path
-	uid := os.Getuid()
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = fmt.Sprintf("/tmp/termtile-runtime-%d", uid)
-		os.MkdirAll(runtimeDir, 0700)
+	socketPath, err := runtimepath.SocketPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve IPC socket path: %w", err)
 	}
-
-	socketPath := filepath.Join(runtimeDir, "termtile.sock")
 
 	// Remove existing socket if present
 	os.Remove(socketPath)

@@ -34,6 +34,7 @@ const (
 	ActionKillAgent      ActionType = "KILL-AGENT"
 	ActionWaitIdle       ActionType = "WAIT-IDLE"
 	ActionListAgents     ActionType = "LIST-AGENTS"
+	ActionMoveTerminal   ActionType = "MOVE-TERMINAL"
 )
 
 // actionLevel returns the log level for an action type.
@@ -41,7 +42,7 @@ func actionLevel(action ActionType) LogLevel {
 	switch action {
 	case ActionSend, ActionRead, ActionWaitIdle, ActionListAgents:
 		return LevelDebug
-	case ActionAddTerminal, ActionRemoveTerminal, ActionWorkspaceNew, ActionWorkspaceClose, ActionSpawnAgent, ActionKillAgent:
+	case ActionAddTerminal, ActionRemoveTerminal, ActionMoveTerminal, ActionWorkspaceNew, ActionWorkspaceClose, ActionSpawnAgent, ActionKillAgent:
 		return LevelInfo
 	default:
 		return LevelInfo

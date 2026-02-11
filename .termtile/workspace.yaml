@@ -1,0 +1,44 @@
+version: 1
+workspace: termtile
+project:
+    root_marker: .git
+    cwd_mode: project_root
+    cwd: null
+mcp:
+    spawn:
+        require_explicit_workspace: false
+        resolution_order:
+            - explicit_arg
+            - source_workspace_hint
+            - project_marker
+            - single_registered_agent_workspace
+            - error
+    read:
+        default_lines: 50
+        max_lines: 100
+        since_last_default: false
+agents:
+    defaults:
+        spawn_mode: window
+        model: null
+        env: {}
+    overrides:
+        claude:
+            model: null
+            env: {}
+        codex:
+            model: gpt-5
+            env:
+                TERM: xterm-256color
+workspace_overrides:
+    layout: null
+    terminal: null
+    terminal_spawn_command: null
+sync:
+    mode: linked
+    pull_on_workspace_load: true
+    push_on_workspace_save: false
+    include:
+        - layout
+        - terminals
+        - agent_mode

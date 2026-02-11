@@ -42,7 +42,17 @@ If you manually close a terminal window or if a window manager event is missed, 
 termtile reads `_NET_WM_STRUT` properties from your desktop panels (GNOME Shell, Polybar, etc.). This ensures that tiled windows never overlap your taskbar or status icons.
 
 ### Move Mode
-When Move Mode is activated (default `Mod4-Mod1-m`), the daemon "grabs" the keyboard. You can use arrow keys to swap the focused terminal's position in the grid and then press `Enter` to confirm or `Esc` to cancel.
+When Move Mode is activated (default `Mod4-Mod1-r`, Super+Alt+R), the daemon grabs the keyboard and shows compact on-screen hints.
+
+Move Mode phases and keys:
+
+| Phase | Keys |
+|---|---|
+| Select terminal | `Arrow keys` cycle terminals, `Enter` grabs selected terminal, `d` opens delete confirmation, `n` inserts after selected slot, `a` appends a new terminal, `Esc` exits |
+| Move grabbed terminal | `Arrow keys` choose target slot, `Enter` confirms move/swap, `Esc` exits |
+| Confirm delete | `Enter` confirms delete, `Esc` cancels delete and returns to select |
+
+If text rendering cannot be initialized in the current X11 environment, Move Mode falls back to border overlays only and keeps keyboard handling unchanged.
 
 ### Multi-Monitor Support
 termtile is monitor-aware. It identifies monitors via XRandR and manages an independent tiling state for each one. Tiling operations only affect windows on the currently active monitor.

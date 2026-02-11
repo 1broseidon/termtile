@@ -86,6 +86,11 @@ type AgentMode struct {
 	// Default: true
 	// Set to false if you want to use your own tmux/screen config entirely
 	ManageMultiplexerConfig *bool `yaml:"manage_multiplexer_config"`
+
+	// ProtectSlotZero prevents slot 0 from being killed in agent-mode
+	// workspaces, since slot 0 is typically the orchestrating agent.
+	// Default: true
+	ProtectSlotZero *bool `yaml:"protect_slot_zero"`
 }
 
 const (
@@ -131,6 +136,16 @@ func (a *AgentMode) GetManageMultiplexerConfig() bool {
 	return *a.ManageMultiplexerConfig
 }
 
+// GetProtectSlotZero returns the effective value, defaulting to true.
+// When true, slot 0 cannot be killed in agent-mode workspaces (it is
+// typically the orchestrating agent).
+func (a *AgentMode) GetProtectSlotZero() bool {
+	if a == nil || a.ProtectSlotZero == nil {
+		return true
+	}
+	return *a.ProtectSlotZero
+}
+
 // AgentConfig describes a CLI agent that can be spawned via MCP.
 type AgentConfig struct {
 	Command       string            `yaml:"command"`
@@ -142,45 +157,177 @@ type AgentConfig struct {
 	PromptAsArg   bool              `yaml:"prompt_as_arg,omitempty"`
 	SpawnMode     string            `yaml:"spawn_mode,omitempty"`     // "pane" (default) or "window"
 	ResponseFence bool              `yaml:"response_fence,omitempty"` // prepend task with fence instructions for structured output parsing
+	PipeTask      bool              `yaml:"pipe_task,omitempty"`      // pipe task via stdin instead of appending as arg or sending via send-keys
 	Models        []string          `yaml:"models,omitempty"`
 	DefaultModel  string            `yaml:"default_model,omitempty"`
 	ModelFlag     string            `yaml:"model_flag,omitempty"`
 }
 
+type ProjectCWDMode string
+
+const (
+	ProjectCWDModeProjectRoot   ProjectCWDMode = "project_root"
+	ProjectCWDModeWorkspaceSave ProjectCWDMode = "workspace_saved"
+	ProjectCWDModeExplicit      ProjectCWDMode = "explicit"
+)
+
+type ProjectSyncMode string
+
+const (
+	ProjectSyncModeLinked   ProjectSyncMode = "linked"
+	ProjectSyncModeDetached ProjectSyncMode = "detached"
+)
+
+const ProjectWorkspaceSchemaVersion = 1
+
+type ProjectWorkspaceProject struct {
+	RootMarker string         `yaml:"root_marker"`
+	CWDMode    ProjectCWDMode `yaml:"cwd_mode"`
+	CWD        string         `yaml:"cwd,omitempty"`
+}
+
+type ProjectWorkspaceMCPSpawn struct {
+	RequireExplicitWorkspace bool     `yaml:"require_explicit_workspace"`
+	ResolutionOrder          []string `yaml:"resolution_order"`
+}
+
+type ProjectWorkspaceMCPRead struct {
+	DefaultLines     int  `yaml:"default_lines"`
+	MaxLines         int  `yaml:"max_lines"`
+	SinceLastDefault bool `yaml:"since_last_default"`
+}
+
+type ProjectWorkspaceMCP struct {
+	Spawn ProjectWorkspaceMCPSpawn `yaml:"spawn"`
+	Read  ProjectWorkspaceMCPRead  `yaml:"read"`
+}
+
+type ProjectWorkspaceAgentDefaults struct {
+	SpawnMode string            `yaml:"spawn_mode,omitempty"`
+	Model     string            `yaml:"model,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
+}
+
+type ProjectWorkspaceAgentOverride struct {
+	SpawnMode string            `yaml:"spawn_mode,omitempty"`
+	Model     string            `yaml:"model,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
+}
+
+type ProjectWorkspaceAgents struct {
+	Defaults  ProjectWorkspaceAgentDefaults            `yaml:"defaults"`
+	Overrides map[string]ProjectWorkspaceAgentOverride `yaml:"overrides,omitempty"`
+}
+
+type ProjectWorkspaceOverrides struct {
+	Layout               string `yaml:"layout,omitempty"`
+	Terminal             string `yaml:"terminal,omitempty"`
+	TerminalSpawnCommand string `yaml:"terminal_spawn_command,omitempty"`
+}
+
+type ProjectWorkspaceSync struct {
+	Mode                ProjectSyncMode `yaml:"mode"`
+	PullOnWorkspaceLoad bool            `yaml:"pull_on_workspace_load"`
+	PushOnWorkspaceSave bool            `yaml:"push_on_workspace_save"`
+	Include             []string        `yaml:"include"`
+}
+
+// ProjectWorkspaceConfig stores effective merged project workspace settings
+// from .termtile/workspace.yaml and .termtile/local.yaml.
+type ProjectWorkspaceConfig struct {
+	Version            int                       `yaml:"version"`
+	Workspace          string                    `yaml:"workspace,omitempty"`
+	Project            ProjectWorkspaceProject   `yaml:"project"`
+	MCP                ProjectWorkspaceMCP       `yaml:"mcp"`
+	Agents             ProjectWorkspaceAgents    `yaml:"agents"`
+	WorkspaceOverrides ProjectWorkspaceOverrides `yaml:"workspace_overrides"`
+	Sync               ProjectWorkspaceSync      `yaml:"sync"`
+}
+
+func DefaultProjectWorkspaceConfig() ProjectWorkspaceConfig {
+	return ProjectWorkspaceConfig{
+		Version:   ProjectWorkspaceSchemaVersion,
+		Workspace: "",
+		Project: ProjectWorkspaceProject{
+			RootMarker: ".git",
+			CWDMode:    ProjectCWDModeProjectRoot,
+		},
+		MCP: ProjectWorkspaceMCP{
+			Spawn: ProjectWorkspaceMCPSpawn{
+				RequireExplicitWorkspace: false,
+				ResolutionOrder: []string{
+					"explicit_arg",
+					"source_workspace_hint",
+					"project_marker",
+					"single_registered_agent_workspace",
+					"error",
+				},
+			},
+			Read: ProjectWorkspaceMCPRead{
+				DefaultLines:     50,
+				MaxLines:         100,
+				SinceLastDefault: false,
+			},
+		},
+		Agents: ProjectWorkspaceAgents{
+			Defaults: ProjectWorkspaceAgentDefaults{
+				SpawnMode: "window",
+				Env:       map[string]string{},
+			},
+			Overrides: map[string]ProjectWorkspaceAgentOverride{},
+		},
+		Sync: ProjectWorkspaceSync{
+			Mode:                ProjectSyncModeLinked,
+			PullOnWorkspaceLoad: true,
+			PushOnWorkspaceSave: false,
+			Include: []string{
+				"layout",
+				"terminals",
+				"agent_mode",
+			},
+		},
+	}
+}
+
 // Config holds the application configuration.
 type Config struct {
-	Hotkey                   string                 `yaml:"hotkey"`
-	CycleLayoutHotkey        string                 `yaml:"cycle_layout_hotkey"`
-	CycleLayoutReverseHotkey string                 `yaml:"cycle_layout_reverse_hotkey"`
-	UndoHotkey               string                 `yaml:"undo_hotkey"`
-	MoveModeHotkey           string                 `yaml:"move_mode_hotkey"`
-	MoveModeTimeout          int                    `yaml:"move_mode_timeout"`
-	PaletteHotkey            string                 `yaml:"palette_hotkey"`
-	PaletteBackend           string                 `yaml:"palette_backend"`
-	PaletteFuzzyMatching     bool                   `yaml:"palette_fuzzy_matching"`
-	PreferredTerminal        string                 `yaml:"preferred_terminal,omitempty"`
-	TerminalSpawnCommands    map[string]string      `yaml:"terminal_spawn_commands"`
-	GapSize                  int                    `yaml:"gap_size"`
-	ScreenPadding            Margins                `yaml:"screen_padding"`
-	DefaultLayout            string                 `yaml:"default_layout"`
-	Layouts                  map[string]Layout      `yaml:"layouts"`
-	TerminalClasses          TerminalClassList      `yaml:"terminal_classes"`
-	TerminalSort             string                 `yaml:"terminal_sort"`
-	LogLevel                 string                 `yaml:"log_level"`
-	TerminalMargins          map[string]Margins     `yaml:"terminal_margins"`
-	AgentMode                AgentMode              `yaml:"agent_mode"`
-	Limits                   Limits                 `yaml:"limits,omitempty"`
-	Logging                  LoggingConfig          `yaml:"logging,omitempty"`
-	Agents                   map[string]AgentConfig `yaml:"agents,omitempty"`
+	Hotkey                   string                  `yaml:"hotkey"`
+	CycleLayoutHotkey        string                  `yaml:"cycle_layout_hotkey"`
+	CycleLayoutReverseHotkey string                  `yaml:"cycle_layout_reverse_hotkey"`
+	UndoHotkey               string                  `yaml:"undo_hotkey"`
+	MoveModeHotkey           string                  `yaml:"move_mode_hotkey"`
+	TerminalAddHotkey        string                  `yaml:"terminal_add_hotkey"`
+	MoveModeTimeout          int                     `yaml:"move_mode_timeout"`
+	PaletteHotkey            string                  `yaml:"palette_hotkey"`
+	PaletteBackend           string                  `yaml:"palette_backend"`
+	PaletteFuzzyMatching     bool                    `yaml:"palette_fuzzy_matching"`
+	Display                  string                  `yaml:"display,omitempty"`
+	XAuthority               string                  `yaml:"xauthority,omitempty"`
+	PreferredTerminal        string                  `yaml:"preferred_terminal,omitempty"`
+	TerminalSpawnCommands    map[string]string       `yaml:"terminal_spawn_commands"`
+	GapSize                  int                     `yaml:"gap_size"`
+	ScreenPadding            Margins                 `yaml:"screen_padding"`
+	DefaultLayout            string                  `yaml:"default_layout"`
+	Layouts                  map[string]Layout       `yaml:"layouts"`
+	TerminalClasses          TerminalClassList       `yaml:"terminal_classes"`
+	TerminalSort             string                  `yaml:"terminal_sort"`
+	LogLevel                 string                  `yaml:"log_level"`
+	TerminalMargins          map[string]Margins      `yaml:"terminal_margins"`
+	AgentMode                AgentMode               `yaml:"agent_mode"`
+	Limits                   Limits                  `yaml:"limits,omitempty"`
+	Logging                  LoggingConfig           `yaml:"logging,omitempty"`
+	Agents                   map[string]AgentConfig  `yaml:"agents,omitempty"`
+	ProjectWorkspace         *ProjectWorkspaceConfig `yaml:"-"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		Hotkey:          "Mod4-Mod1-t",
-		MoveModeHotkey:  "Mod4-Mod1-r", // Super+Alt+R for "relocate"
-		MoveModeTimeout: 10,            // 10 seconds default timeout
-		PaletteHotkey:   "Mod4-Mod1-g", // Super+Alt+G for palette
-		PaletteBackend:  "auto",
+		Hotkey:            "Mod4-Mod1-t",
+		MoveModeHotkey:    "Mod4-Mod1-r", // Super+Alt+R for "relocate"
+		TerminalAddHotkey: "Mod4-Mod1-n", // Super+Alt+N for new terminal in active workspace
+		MoveModeTimeout:   10,            // 10 seconds default timeout
+		PaletteHotkey:     "Mod4-Mod1-g", // Super+Alt+G for palette
+		PaletteBackend:    "auto",
 		// Disabled by default to preserve existing match behavior.
 		PaletteFuzzyMatching: false,
 		TerminalSpawnCommands: map[string]string{
@@ -228,7 +375,7 @@ func DefaultConfig() *Config {
 			},
 			"codex": {
 				Command:       "codex",
-				Args:          []string{"--full-auto", "-c", "notice.model_migrations={}", "-c", "notice.hide_rate_limit_switch_prompt=true"},
+				Args:          []string{"--full-auto", "--no-alt-screen", "-c", "notice.model_migrations={}", "-c", "notice.hide_rate_limit_switch_prompt=true"},
 				Description:   "OpenAI Codex CLI agent",
 				SpawnMode:     "window",
 				PromptAsArg:   true,
@@ -253,6 +400,28 @@ func DefaultConfig() *Config {
 				PromptAsArg:   true,
 				IdlePattern:   "\u2192", // → (U+2192) Cursor agent input prompt
 				ResponseFence: true,
+			},
+			"cecli": {
+				Command:       "cecli",
+				Args:          []string{"--no-tui", "--yes-always", "--no-auto-commits", "--no-check-update", "--no-show-model-warnings"},
+				Description:   "Cecli (aider fork) coding agent",
+				SpawnMode:     "window",
+				PipeTask:      true,
+				ResponseFence: true,
+				Models:        []string{"anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-6", "openai/gpt-5.2", "deepseek/deepseek-chat"},
+				DefaultModel:  "anthropic/claude-sonnet-4-5",
+				ModelFlag:     "--model",
+			},
+			"pi": {
+				Command:       "pi",
+				Args:          []string{"--no-session"},
+				Description:   "Pi coding agent (multi-provider)",
+				SpawnMode:     "window",
+				PromptAsArg:   true,
+				IdlePattern:   "\u2500", // ─ (U+2500) Box drawing horizontal, part of pi's input divider
+				ResponseFence: true,
+				Models:        []string{"gemini-3-pro-high", "gemini-3-flash", "claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"},
+				DefaultModel:  "gemini-3-pro-high",
 			},
 		},
 	}

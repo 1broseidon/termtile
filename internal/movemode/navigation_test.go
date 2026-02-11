@@ -1,6 +1,7 @@
 package movemode
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/1broseidon/termtile/internal/tiling"
@@ -189,6 +190,126 @@ func TestNavigateTerminal(t *testing.T) {
 			if got != tt.expected {
 				t.Errorf("NavigateTerminal(%d, %v, %d) = %d, want %d",
 					tt.current, tt.dir, tt.count, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestStateDeleteConfirmationLifecycle(t *testing.T) {
+	state := NewState()
+	state.Phase = PhaseSelecting
+
+	state.BeginDeleteConfirmation(3)
+	if state.Phase != PhaseConfirmDelete {
+		t.Fatalf("phase = %v, want %v", state.Phase, PhaseConfirmDelete)
+	}
+	if state.PendingAction != ActionDeleteSelected {
+		t.Fatalf("pending action = %v, want %v", state.PendingAction, ActionDeleteSelected)
+	}
+	if state.PendingSlot != 3 {
+		t.Fatalf("pending slot = %d, want 3", state.PendingSlot)
+	}
+
+	state.ClearPendingAction()
+	if state.PendingAction != ActionNone {
+		t.Fatalf("pending action after clear = %v, want %v", state.PendingAction, ActionNone)
+	}
+	if state.PendingSlot != -1 {
+		t.Fatalf("pending slot after clear = %d, want -1", state.PendingSlot)
+	}
+
+	state.Reset()
+	if state.Phase != PhaseInactive {
+		t.Fatalf("phase after reset = %v, want %v", state.Phase, PhaseInactive)
+	}
+	if state.PendingAction != ActionNone {
+		t.Fatalf("pending action after reset = %v, want %v", state.PendingAction, ActionNone)
+	}
+}
+
+func TestActionFromKeysym(t *testing.T) {
+	tests := []struct {
+		name   string
+		keysym uint32
+		want   Action
+		ok     bool
+	}{
+		{name: "d", keysym: keysymd, want: ActionDeleteSelected, ok: true},
+		{name: "D", keysym: keysymD, want: ActionDeleteSelected, ok: true},
+		{name: "n", keysym: keysymn, want: ActionInsertAfterSelected, ok: true},
+		{name: "N", keysym: keysymN, want: ActionInsertAfterSelected, ok: true},
+		{name: "a", keysym: keysyma, want: ActionAppend, ok: true},
+		{name: "A", keysym: keysymA, want: ActionAppend, ok: true},
+		{name: "unsupported", keysym: keysymRight, want: ActionNone, ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := actionFromKeysym(tt.keysym)
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v", ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("action = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalActionArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		action      Action
+		slot        int
+		wantArgs    []string
+		expectError bool
+	}{
+		{
+			name:     "delete selected slot",
+			action:   ActionDeleteSelected,
+			slot:     2,
+			wantArgs: []string{"remove", "--slot", "2"},
+		},
+		{
+			name:     "insert after selected slot",
+			action:   ActionInsertAfterSelected,
+			slot:     2,
+			wantArgs: []string{"add", "--slot", "3"},
+		},
+		{
+			name:     "append terminal",
+			action:   ActionAppend,
+			slot:     -1,
+			wantArgs: []string{"add"},
+		},
+		{
+			name:        "delete with invalid slot",
+			action:      ActionDeleteSelected,
+			slot:        -1,
+			expectError: true,
+		},
+		{
+			name:        "unsupported action",
+			action:      ActionNone,
+			slot:        0,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := terminalActionArgs(tt.action, tt.slot)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error for action=%v slot=%d", tt.action, tt.slot)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.wantArgs) {
+				t.Fatalf("args = %v, want %v", got, tt.wantArgs)
 			}
 		})
 	}

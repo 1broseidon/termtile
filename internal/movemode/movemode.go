@@ -3,7 +3,11 @@ package movemode
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +23,22 @@ import (
 
 // Default timeout for move mode (in seconds)
 const DefaultTimeout = 10
+
+const (
+	keysymUp      = 0xff52
+	keysymDown    = 0xff54
+	keysymLeft    = 0xff51
+	keysymRight   = 0xff53
+	keysymReturn  = 0xff0d
+	keysymEscape  = 0xff1b
+	keysymKPEnter = 0xff8d
+	keysymA       = 0x0041
+	keysyma       = 0x0061
+	keysymD       = 0x0044
+	keysymd       = 0x0064
+	keysymN       = 0x004e
+	keysymn       = 0x006e
+)
 
 // LayoutProvider supplies the currently active layout name.
 type LayoutProvider interface {
@@ -45,6 +65,9 @@ type MoveResult struct {
 // It receives the move result for post-processing (e.g., renaming tmux sessions).
 type OnMoveCompleteFunc func(result MoveResult)
 
+// TerminalActionRunner executes existing terminal CLI subcommands.
+type TerminalActionRunner func(args []string) error
+
 // Mode is the main move mode controller
 type Mode struct {
 	mu              sync.Mutex
@@ -64,6 +87,7 @@ type Mode struct {
 
 	// OnMoveComplete is called after a successful move/swap operation.
 	OnMoveComplete OnMoveCompleteFunc
+	actionRunner   TerminalActionRunner
 }
 
 // NewMode creates a new move mode controller
@@ -91,6 +115,7 @@ func NewMode(backend platform.Backend, detector *terminals.Detector, cfg *config
 		state:           NewState(),
 		overlay:         NewOverlayManager(xu, root),
 		timeoutDuration: time.Duration(timeout) * time.Second,
+		actionRunner:    runTerminalActionViaCLI,
 	}
 }
 
@@ -220,6 +245,7 @@ func (m *Mode) Enter() error {
 	m.state.SelectedIndex = 0
 	m.state.GrabbedWindow = 0
 	m.state.TargetSlotIndex = 0
+	m.state.ClearPendingAction()
 
 	// Find the active window and select it if it's a terminal
 	activeWin, _ := m.backend.ActiveWindow()
@@ -311,8 +337,7 @@ func (m *Mode) HandleCancel() {
 		return
 	}
 
-	log.Println("Move mode: cancelled")
-	m.exitLocked()
+	m.handleCancelLocked()
 }
 
 // executeMove moves the grabbed window to the target slot
@@ -416,9 +441,11 @@ func (m *Mode) updateOverlays() {
 	var terminalColors []uint32
 	var slotRects []tiling.Rect
 	var slotColors []uint32
+	hintPhase := HintPhaseNone
 
 	switch m.state.Phase {
 	case PhaseSelecting:
+		hintPhase = HintPhaseSelecting
 		term := m.state.SelectedTerminal()
 		if term == nil {
 			m.overlay.HideAll()
@@ -431,7 +458,22 @@ func (m *Mode) updateOverlays() {
 		terminalRects = []tiling.Rect{rect}
 		terminalColors = []uint32{uint32(ColorSelection)}
 
+	case PhaseConfirmDelete:
+		hintPhase = HintPhaseConfirmDelete
+		term := m.state.SelectedTerminal()
+		if term == nil {
+			m.overlay.HideAll()
+			return
+		}
+		rect, ok := m.getVisibleWindowRect(term.Window.WindowID)
+		if !ok {
+			rect = tiling.Rect{X: term.Window.X, Y: term.Window.Y, Width: term.Window.Width, Height: term.Window.Height}
+		}
+		terminalRects = []tiling.Rect{rect}
+		terminalColors = []uint32{uint32(ColorTarget)}
+
 	case PhaseGrabbed:
+		hintPhase = HintPhaseMove
 		grabbedTerm := TerminalSlot{}
 		foundGrabbed := false
 		for _, t := range m.state.Terminals {
@@ -457,7 +499,7 @@ func (m *Mode) updateOverlays() {
 		}
 	}
 
-	if err := m.overlay.Render(terminalRects, terminalColors, slotRects, slotColors); err != nil {
+	if err := m.overlay.Render(terminalRects, terminalColors, slotRects, slotColors, m.state.SlotPositions, hintPhase); err != nil {
 		log.Printf("Move mode: overlay render failed: %v", err)
 	}
 }
@@ -827,31 +869,23 @@ func (m *Mode) handleKeyPress(xu *xgbutil.XUtil, ev xevent.KeyPressEvent) {
 		return
 	}
 
-	// Map keysyms to actions
-	const (
-		XK_Up       = 0xff52
-		XK_Down     = 0xff54
-		XK_Left     = 0xff51
-		XK_Right    = 0xff53
-		XK_Return   = 0xff0d
-		XK_Escape   = 0xff1b
-		XK_KP_Enter = 0xff8d
-	)
-
 	switch keysym {
-	case XK_Up:
+	case keysymUp:
 		m.handleArrowKeyLocked(DirUp)
-	case XK_Down:
+	case keysymDown:
 		m.handleArrowKeyLocked(DirDown)
-	case XK_Left:
+	case keysymLeft:
 		m.handleArrowKeyLocked(DirLeft)
-	case XK_Right:
+	case keysymRight:
 		m.handleArrowKeyLocked(DirRight)
-	case XK_Return, XK_KP_Enter:
+	case keysymReturn, keysymKPEnter:
 		m.handleConfirmLocked()
-	case XK_Escape:
-		log.Println("Move mode: cancelled via Escape")
-		m.exitLocked()
+	case keysymEscape:
+		m.handleCancelLocked()
+	default:
+		if action, ok := actionFromKeysym(uint32(keysym)); ok {
+			m.handleActionKeyLocked(action)
+		}
 	}
 }
 
@@ -868,6 +902,9 @@ func (m *Mode) handleArrowKeyLocked(dir Direction) {
 			m.updateOverlays()
 			log.Printf("Move mode: selected terminal %d", newIdx)
 		}
+
+	case PhaseConfirmDelete:
+		// Keep confirmation target stable until Enter/Escape.
 
 	case PhaseGrabbed:
 		newIdx := NavigateSlotSpatial(m.state.TargetSlotIndex, dir, m.state.SlotPositions, m.state.GridRows, m.state.GridCols)
@@ -900,5 +937,148 @@ func (m *Mode) handleConfirmLocked() {
 	case PhaseGrabbed:
 		m.executeMove()
 		m.exitLocked()
+
+	case PhaseConfirmDelete:
+		if m.state.PendingAction != ActionDeleteSelected || m.state.PendingSlot < 0 {
+			log.Println("Move mode: delete confirmation had no valid pending target; returning to selection")
+			m.state.Phase = PhaseSelecting
+			m.state.ClearPendingAction()
+			m.updateOverlays()
+			m.startTimeout()
+			return
+		}
+		m.executeTerminalActionLocked(ActionDeleteSelected, m.state.PendingSlot)
 	}
+}
+
+func (m *Mode) handleCancelLocked() {
+	switch m.state.Phase {
+	case PhaseConfirmDelete:
+		m.state.Phase = PhaseSelecting
+		m.state.ClearPendingAction()
+		m.updateOverlays()
+		m.startTimeout()
+		log.Println("Move mode: delete confirmation cancelled")
+	default:
+		log.Println("Move mode: cancelled")
+		m.exitLocked()
+	}
+}
+
+func (m *Mode) handleActionKeyLocked(action Action) {
+	// Keep mode alive while user works through action keys.
+	m.startTimeout()
+
+	if m.state.Phase == PhaseInactive || m.state.Phase == PhaseGrabbed {
+		return
+	}
+	if m.state.Phase == PhaseConfirmDelete && action != ActionDeleteSelected {
+		return
+	}
+
+	switch action {
+	case ActionDeleteSelected:
+		if m.state.Phase == PhaseConfirmDelete {
+			return
+		}
+		term := m.state.SelectedTerminal()
+		if term == nil {
+			return
+		}
+		m.state.BeginDeleteConfirmation(term.SlotIdx)
+		m.updateOverlays()
+		log.Printf("Move mode: delete requested for slot %d (press Enter to confirm, Escape to cancel)", term.SlotIdx)
+	case ActionInsertAfterSelected:
+		term := m.state.SelectedTerminal()
+		if term == nil {
+			return
+		}
+		m.executeTerminalActionLocked(ActionInsertAfterSelected, term.SlotIdx)
+	case ActionAppend:
+		m.executeTerminalActionLocked(ActionAppend, -1)
+	}
+}
+
+func (m *Mode) executeTerminalActionLocked(action Action, selectedSlot int) {
+	args, err := terminalActionArgs(action, selectedSlot)
+	if err != nil {
+		log.Printf("Move mode: cannot run %s action: %v", action, err)
+		m.state.Phase = PhaseSelecting
+		m.state.ClearPendingAction()
+		m.updateOverlays()
+		return
+	}
+
+	runner := m.actionRunner
+	if runner == nil {
+		log.Printf("Move mode: no action runner configured for %s", action)
+		m.state.Phase = PhaseSelecting
+		m.state.ClearPendingAction()
+		m.updateOverlays()
+		return
+	}
+
+	log.Printf("Move mode: executing action %s (%s)", action, strings.Join(args, " "))
+	m.exitLocked()
+
+	go func(a Action, argv []string) {
+		if err := runner(argv); err != nil {
+			log.Printf("Move mode: action %s failed: %v", a, err)
+			return
+		}
+		log.Printf("Move mode: action %s completed", a)
+	}(action, append([]string(nil), args...))
+}
+
+func actionFromKeysym(keysym uint32) (Action, bool) {
+	switch keysym {
+	case keysymD, keysymd:
+		return ActionDeleteSelected, true
+	case keysymN, keysymn:
+		return ActionInsertAfterSelected, true
+	case keysymA, keysyma:
+		return ActionAppend, true
+	default:
+		return ActionNone, false
+	}
+}
+
+func terminalActionArgs(action Action, selectedSlot int) ([]string, error) {
+	switch action {
+	case ActionDeleteSelected:
+		if selectedSlot < 0 {
+			return nil, fmt.Errorf("invalid slot for delete action: %d", selectedSlot)
+		}
+		return []string{"remove", "--slot", strconv.Itoa(selectedSlot)}, nil
+	case ActionInsertAfterSelected:
+		if selectedSlot < 0 {
+			return nil, fmt.Errorf("invalid slot for insert action: %d", selectedSlot)
+		}
+		return []string{"add", "--slot", strconv.Itoa(selectedSlot + 1)}, nil
+	case ActionAppend:
+		return []string{"add"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported action %q", action.String())
+	}
+}
+
+func runTerminalActionViaCLI(args []string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	cmdArgs := make([]string, 0, len(args)+1)
+	cmdArgs = append(cmdArgs, "terminal")
+	cmdArgs = append(cmdArgs, args...)
+
+	cmd := exec.Command(exePath, cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("terminal command failed: %w: %s", err, msg)
+		}
+		return fmt.Errorf("terminal command failed: %w", err)
+	}
+	return nil
 }
