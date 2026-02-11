@@ -1,4 +1,4 @@
-.PHONY: help build install test vet lint check clean publish publish-dry-run
+.PHONY: help build install test vet lint check clean publish publish-dry-run brainfile-validate
 .DEFAULT_GOAL := help
 
 BIN     := termtile
@@ -35,3 +35,6 @@ publish: ## Create release commit+tag and push (BUMP=major|minor|patch|none or V
 
 publish-dry-run: ## Preview release commands without changing git state
 	DRY_RUN=1 ./scripts/publish.sh
+
+brainfile-validate: ## Validate .brainfile/brainfile.md task state consistency
+	bash .github/scripts/brainfile-validate.sh

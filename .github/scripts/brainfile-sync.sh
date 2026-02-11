@@ -123,6 +123,7 @@ find_issue_by_task_id() {
 
 main() {
   echo "==> Syncing brainfile to GitHub Issues"
+  bash .github/scripts/brainfile-validate.sh
 
   ensure_label
 

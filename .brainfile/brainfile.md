@@ -57,9 +57,6 @@ columns:
           - config
           - terminal
           - phase-2
-  - id: in-progress
-    title: In Progress
-    tasks:
       - id: task-99
         title: "Super+Alt+R selector refactor: discover, fix, and deploy"
         description: Current Super+Alt+R selector UX is inconsistent and visually incorrect (outline sizing mismatch, overlay menu visibility issues, and phase-dependent rendering glitches). Run a focused discovery to identify root causes, then define an implementation and rollout plan that restores predictable behavior and consistent visuals.
@@ -90,7 +87,7 @@ columns:
             title: Define implementation tasks/contracts for parallel delegation
             completed: false
         contract:
-          status: in_progress
+          status: ready
           deliverables:
             - type: file
               path: .brainfile/plans/super-alt-r-selector-refactor-discovery.md
@@ -106,7 +103,10 @@ columns:
             - Report must include exact file/function touch points for each root cause
             - Include rollout/testing strategy to validate visual parity and interaction correctness
             - Output summary must be consumable for immediate parallel task delegation
-        assignee: pi-explore-alt-r
+        assignee: ""
+  - id: in-progress
+    title: In Progress
+    tasks: []
   - id: done
     title: Done
     tasks:
@@ -690,6 +690,35 @@ columns:
             - Command behavior must align with .brainfile/plans/project-workspace-schema-v1.md
             - Do not regress existing workspace commands
             - Keep sync behavior explicit and safe (no silent destructive merge)
+      - id: task-103
+        title: "Release automation: interactive make publish with semver/tag push flow"
+        description: Added scripts/publish.sh and Makefile publish targets. Workflow now supports interactive major/minor/patch/none selection when VERSION/BUMP not provided, explicit VERSION override, dry-run mode, tests toggle, dirty-tree guard, version file update (ServerVersion), commit, annotated tag, and remote push.
+        priority: medium
+        tags:
+          - release
+          - build
+          - automation
+          - cli
+          - makefile
+        assignee: codex
+        relatedFiles:
+          - Makefile
+          - scripts/publish.sh
+      - id: task-104
+        title: "Brainfile sync guard: validate task state consistency before issue sync"
+        description: Added a pre-sync validator for .brainfile/brainfile.md and wired it into GitHub Actions + sync script. Validation now fails fast on inconsistent task/contract state before any issue create/edit/close operations run.
+        priority: high
+        tags:
+          - brainfile
+          - github-actions
+          - sync
+          - validation
+        assignee: codex
+        relatedFiles:
+          - .github/scripts/brainfile-validate.sh
+          - .github/scripts/brainfile-sync.sh
+          - .github/workflows/brainfile-sync.yml
+          - Makefile
   - id: backlog
     title: Backlog
     tasks:
