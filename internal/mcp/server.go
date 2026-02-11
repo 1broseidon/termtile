@@ -22,7 +22,7 @@ import (
 const (
 	DefaultWorkspace = "mcp-agents"
 	ServerName       = "termtile"
-	ServerVersion    = "0.1.0"
+	ServerVersion    = "1.0.0"
 )
 
 // trackedAgent records which agent type occupies a workspace slot.
