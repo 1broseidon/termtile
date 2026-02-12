@@ -81,6 +81,8 @@ termtile uses a three-tier system to determine if an agent is "done":
 
 ## Configuration
 
+### Agent Definitions
+
 Agents are defined in your `config.yaml` under the `agents:` section:
 
 ```yaml
@@ -93,6 +95,19 @@ agents:
     response_fence: true
     description: "Claude Code CLI agent"
 ```
+
+### Agent Mode Settings
+
+Configure how termtile manages terminal multiplexers for agent orchestration:
+
+```yaml
+agent_mode:
+  multiplexer: "auto"                    # auto, tmux, screen (default: auto)
+  manage_multiplexer_config: true        # Let termtile manage multiplexer config (default: true)
+  protect_slot_zero: true                # Protect slot 0 from being killed (default: true)
+```
+
+See the [Configuration Documentation](configuration.md#agent-mode) for more details.
 
 ## Pipeline Dependencies (`depends_on`)
 

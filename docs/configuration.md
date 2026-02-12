@@ -63,15 +63,17 @@ include:
 
 ## Global Options
 
-| Option | Type | Description |
-|---|---|---|
-| `hotkey` | string | Global hotkey to trigger tiling. |
-| `gap_size` | int | Gap between tiled windows in pixels. |
-| `default_layout` | string | Layout applied on daemon startup. |
-| `terminal_sort` | string | Order of windows: `position`, `window_id`, `client_list`, `active_first`. |
-| `log_level` | string | `debug`, `info`, `warning`, `error`. |
-| `display` | string | Optional X11 display override for window-mode agent spawns (e.g. `:1`). |
-| `xauthority` | string | Optional Xauthority path override used with `display` for window-mode spawns. |
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `hotkey` | string | `Mod4-Mod1-t` | Global hotkey to trigger tiling. |
+| `gap_size` | int | `0` | Gap between tiled windows in pixels. |
+| `screen_padding` | object | `{top:0, bottom:0, left:0, right:0}` | Padding around the screen edges (see Margins below). |
+| `default_layout` | string | (first layout) | Layout applied on daemon startup. |
+| `preferred_terminal` | string | (auto-detected) | Preferred terminal class to use when spawning. |
+| `terminal_sort` | string | `position` | Order of windows: `position`, `window_id`, `client_list`, `active_first`. |
+| `log_level` | string | `info` | Simple log level: `debug`, `info`, `warning`, `error`. See `logging` section for advanced options. |
+| `display` | string | (inherited) | Optional X11 display override for window-mode agent spawns (e.g. `:1`). |
+| `xauthority` | string | (inherited) | Optional Xauthority path override used with `display` for window-mode spawns. |
 
 ## Hotkeys
 
@@ -79,12 +81,13 @@ Hotkeys use the format `[Modifier]-[Key]`.
 Modifiers: `Mod4` (Super), `Mod1` (Alt), `Control`, `Shift`.
 
 ```yaml
-hotkey: "Mod4-Mod1-t"
-cycle_layout_hotkey: "Mod4-Mod1-bracketright"
-undo_hotkey: "Mod4-Mod1-u"
-move_mode_hotkey: "Mod4-Mod1-r"
-terminal_add_hotkey: "Mod4-Mod1-n"
-palette_hotkey: "Mod4-Mod1-g"
+hotkey: "Mod4-Mod1-t"                          # Main tiling hotkey
+cycle_layout_hotkey: "Mod4-Mod1-bracketright"   # Cycle to next layout
+cycle_layout_reverse_hotkey: ""                 # Cycle to previous layout (optional)
+undo_hotkey: "Mod4-Mod1-u"                      # Undo last layout change
+move_mode_hotkey: "Mod4-Mod1-r"                 # Enter move/relocate mode (default: Mod4-Mod1-r)
+terminal_add_hotkey: "Mod4-Mod1-n"              # Add new terminal to active workspace (default: Mod4-Mod1-n)
+palette_hotkey: "Mod4-Mod1-g"                   # Open command palette (default: Mod4-Mod1-g)
 ```
 
 ### Move Mode Interaction
@@ -95,7 +98,24 @@ palette_hotkey: "Mod4-Mod1-g"
 - `move`: after grabbing, pick a target slot (`Arrow keys`) and confirm move/swap (`Enter`)
 - `confirm-delete`: confirm deletion (`Enter`) or cancel and return to select (`Esc`)
 
-If text rendering is unavailable in the current environment, Move Mode keeps the border overlays and continues without the text panel.
+
+### Move Mode Timeout
+
+```yaml
+move_mode_timeout: 10  # Timeout in seconds (default: 10)
+```
+
+## Command Palette
+
+The command palette provides a quick launcher for common actions.
+
+```yaml
+palette_hotkey: "Mod4-Mod1-g"      # Hotkey to open palette (default: Mod4-Mod1-g)
+palette_backend: "auto"             # Backend: auto, rofi, fuzzel, dmenu, wofi (default: auto)
+palette_fuzzy_matching: false       # Enable fuzzy matching (default: false)
+```
+
+The palette automatically detects available backends (`rofi`, `fuzzel`, `dmenu`, `wofi`) when set to `auto`.
 
 ## Terminal Detection
 
@@ -109,12 +129,14 @@ terminal_classes:
 ```
 
 ### Spawn Commands
-Define how to launch new terminals.
+Define how to launch new terminals. This is a map of terminal class to command template.
 ```yaml
 terminal_spawn_commands:
-  - class: Alacritty
-    command: "alacritty --working-directory {{dir}} -e {{cmd}}"
+  Alacritty: "alacritty --working-directory {{dir}} -e {{cmd}}"
+  kitty: "kitty --directory {{dir}} {{cmd}}"
 ```
+
+Available template variables: `{{dir}}` (working directory), `{{cmd}}` (command to execute).
 
 ### Per-Terminal Margins
 Adjust for internal padding of specific terminals.
@@ -145,6 +167,39 @@ layouts:
 ```
 
 See the [Layouts Documentation](layouts.md) for more details.
+
+## Agent Mode
+
+Configure how termtile manages terminal multiplexers (tmux/screen) for agent orchestration.
+
+```yaml
+agent_mode:
+  multiplexer: "auto"                    # Which multiplexer to use: auto, tmux, screen (default: auto)
+  manage_multiplexer_config: true        # Let termtile manage multiplexer config (default: true)
+  protect_slot_zero: true                # Protect slot 0 from being killed (default: true)
+```
+
+- **`multiplexer`**: Specifies which terminal multiplexer to use. `auto` will detect and prefer tmux over screen.
+- **`manage_multiplexer_config`**: When `true`, termtile generates an optimized multiplexer config file (e.g., `~/.config/termtile/tmux.conf`). Set to `false` to use your own tmux/screen config entirely.
+- **`protect_slot_zero`**: When `true`, prevents slot 0 from being killed via MCP tools, providing a safe anchor slot.
+
+## Logging
+
+Configure structured logging for agent actions and system events.
+
+```yaml
+logging:
+  enabled: false                         # Enable structured logging (default: false)
+  level: "info"                          # Log level: debug, info, warn, error (default: info)
+  file: "~/.local/share/termtile/agent-actions.log"  # Log file path
+  max_size_mb: 10                        # Maximum log file size before rotation (default: 10)
+  max_files: 3                           # Number of rotated files to keep (default: 3)
+  include_content: false                 # Include full command/output content in logs (default: false)
+  preview_length: 100                    # Length of content preview when include_content is false (default: 100)
+```
+
+**Note**: The simple `log_level` field is still supported for basic logging, but the `logging` section provides more comprehensive control.
+
 
 ## Agent Orchestration
 
