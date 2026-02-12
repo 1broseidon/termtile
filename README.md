@@ -58,9 +58,15 @@ termtile tui
 ### Working with Agents
 Use the MCP server to orchestrate AI agents from Claude Code or any MCP client:
 ```bash
-# Start the MCP server (stdio transport)
-termtile mcp serve
+# Claude Code — one-liner setup
+claude mcp add termtile -- termtile mcp serve
 
+# Or add to your client's mcpServers config:
+# { "command": "termtile", "args": ["mcp", "serve"] }
+```
+
+Once connected, your AI client can spawn, monitor, and coordinate agents in tiled terminals:
+```bash
 # Create a workspace with tmux sessions for agent control
 termtile workspace new --agent-mode -n 3 dev-env
 ```

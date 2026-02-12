@@ -4,12 +4,45 @@ termtile includes a built-in Model Context Protocol (MCP) server that allows AI 
 
 ## MCP Server
 
-The server runs on `stdio` and can be integrated with Claude Desktop, Claude Code, or any MCP-compliant client.
+The server runs on `stdio` and can be integrated with Claude Code, Claude Desktop, or any MCP-compliant client.
 
-**Launch command:**
+### Connecting Your AI Client
+
+**Claude Code:**
 ```bash
-termtile mcp serve
+claude mcp add termtile -- termtile mcp serve
 ```
+
+**Claude Desktop / generic MCP clients** — add to your `mcpServers` config:
+```json
+{
+  "mcpServers": {
+    "termtile": {
+      "command": "termtile",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+If `termtile` isn't on your PATH, use the full path to the binary (e.g. `"/usr/local/bin/termtile"`).
+
+**Window-mode spawning** requires `DISPLAY` to be available to the MCP server process. Most clients inherit this from your desktop session automatically. If window spawns time out, pass it explicitly:
+```json
+{
+  "mcpServers": {
+    "termtile": {
+      "command": "termtile",
+      "args": ["mcp", "serve"],
+      "env": {
+        "DISPLAY": ":1"
+      }
+    }
+  }
+}
+```
+
+Pane mode (`window: false`) works without `DISPLAY` since it only creates tmux panes.
 
 ## Available Tools
 
