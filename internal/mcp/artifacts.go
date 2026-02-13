@@ -1,128 +1,219 @@
 package mcp
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
 const (
-	// DefaultArtifactCapBytes is the maximum size of a stored artifact per slot.
-	// Artifacts are kept in memory only.
-	DefaultArtifactCapBytes = 1 << 20 // 1MB
+	artifactFileName = "output.json"
 )
 
-type artifactKey struct {
-	workspace string
-	slot      int
+type hookArtifactPayload struct {
+	Status string `json:"status"`
+	Output string `json:"output"`
 }
 
-// Artifact is a captured output blob for a given workspace slot.
-type Artifact struct {
-	Workspace      string    `json:"workspace"`
-	Slot           int       `json:"slot"`
-	Output         string    `json:"output"`
-	Truncated      bool      `json:"truncated"`
-	Warning        string    `json:"warning,omitempty"`
-	OriginalBytes  int       `json:"original_bytes"`
-	StoredBytes    int       `json:"stored_bytes"`
-	LastUpdatedUTC time.Time `json:"last_updated_utc"`
-}
-
-// ArtifactStore holds slot artifacts in memory with a per-artifact size cap.
-// It is safe for concurrent access.
-type ArtifactStore struct {
-	mu       sync.RWMutex
-	capBytes int
-	items    map[artifactKey]Artifact
-}
-
-func NewArtifactStore(capBytes int) *ArtifactStore {
-	if capBytes <= 0 {
-		capBytes = DefaultArtifactCapBytes
+func parseHookArtifactPayload(data []byte) (hookArtifactPayload, error) {
+	if strings.TrimSpace(string(data)) == "" {
+		return hookArtifactPayload{}, errors.New("artifact is empty")
 	}
-	return &ArtifactStore{
-		capBytes: capBytes,
-		items:    make(map[artifactKey]Artifact),
+	var payload hookArtifactPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return hookArtifactPayload{}, err
 	}
+	return payload, nil
 }
 
-func (s *ArtifactStore) Set(workspace string, slot int, output string) Artifact {
-	if s == nil {
-		return Artifact{}
+func readArtifactOutputField(workspace string, slot int) (string, error) {
+	data, err := ReadArtifact(workspace, slot)
+	if err != nil {
+		return "", err
 	}
+	payload, err := parseHookArtifactPayload(data)
+	if err != nil {
+		return "", err
+	}
+	return payload.Output, nil
+}
+
+func normalizeArtifactWorkspace(workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
-		workspace = DefaultWorkspace
+		return DefaultWorkspace
 	}
-
-	capped, truncated, warning := truncateWithWarning(output, s.capBytes)
-	now := time.Now().UTC()
-
-	art := Artifact{
-		Workspace:      workspace,
-		Slot:           slot,
-		Output:         capped,
-		Truncated:      truncated,
-		Warning:        warning,
-		OriginalBytes:  len(output),
-		StoredBytes:    len(capped),
-		LastUpdatedUTC: now,
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.items[artifactKey{workspace: workspace, slot: slot}] = art
-	return art
+	return workspace
 }
 
-func (s *ArtifactStore) Get(workspace string, slot int) (Artifact, bool) {
-	if s == nil {
-		return Artifact{}, false
+func artifactBaseDir() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
+		return filepath.Join(xdg, "termtile", "artifacts"), nil
 	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		workspace = DefaultWorkspace
+
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		home = strings.TrimSpace(os.Getenv("HOME"))
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	art, ok := s.items[artifactKey{workspace: workspace, slot: slot}]
-	return art, ok
+	if home == "" {
+		return "", fmt.Errorf("failed to resolve artifact directory: home directory is not set")
+	}
+
+	return filepath.Join(home, ".local", "share", "termtile", "artifacts"), nil
 }
 
-func (s *ArtifactStore) Clear(workspace string, slot int) {
-	if s == nil {
-		return
+// GetArtifactDir returns the filesystem directory for workspace+slot artifacts:
+// {base}/artifacts/{workspace}/{slot}.
+func GetArtifactDir(workspace string, slot int) (string, error) {
+	if slot < 0 {
+		return "", fmt.Errorf("invalid slot %d", slot)
 	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		workspace = DefaultWorkspace
+	baseDir, err := artifactBaseDir()
+	if err != nil {
+		return "", err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.items, artifactKey{workspace: workspace, slot: slot})
+	return filepath.Join(baseDir, normalizeArtifactWorkspace(workspace), strconv.Itoa(slot)), nil
 }
 
-func truncateWithWarning(s string, capBytes int) (out string, truncated bool, warning string) {
-	if capBytes <= 0 {
-		capBytes = DefaultArtifactCapBytes
+func artifactFilePath(workspace string, slot int) (string, error) {
+	artifactDir, err := GetArtifactDir(workspace, slot)
+	if err != nil {
+		return "", err
 	}
-	if len(s) <= capBytes {
-		return s, false, ""
+	return filepath.Join(artifactDir, artifactFileName), nil
+}
+
+// EnsureArtifactDir creates the artifact directory for workspace+slot with 0755
+// permissions. Returns the directory path on success.
+func EnsureArtifactDir(workspace string, slot int) (string, error) {
+	artifactDir, err := GetArtifactDir(workspace, slot)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return "", err
+	}
+	return artifactDir, nil
+}
+
+// ReadArtifact reads output.json from the workspace+slot artifact directory.
+func ReadArtifact(workspace string, slot int) ([]byte, error) {
+	path, err := artifactFilePath(workspace, slot)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+// CleanupArtifact removes the workspace+slot artifact directory and its
+// contents. It is safe to call even if the directory does not exist.
+func CleanupArtifact(workspace string, slot int) error {
+	artifactDir, err := GetArtifactDir(workspace, slot)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(artifactDir)
+}
+
+// CleanStaleOutput removes only the output.json artifact file from a
+// workspace+slot directory, preserving context.md and checkpoint.json
+// which may have been placed by the orchestrator for the next spawn.
+func CleanStaleOutput(workspace string, slot int) error {
+	path, err := artifactFilePath(workspace, slot)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func moveArtifactDir(srcWorkspace string, srcSlot int, dstWorkspace string, dstSlot int) error {
+	srcDir, err := GetArtifactDir(srcWorkspace, srcSlot)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(srcDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
-	warning = fmt.Sprintf("artifact truncated from %d bytes to %d bytes", len(s), capBytes)
-	suffix := "\n\n[termtile-warning] " + warning + "\n"
-	if len(suffix) >= capBytes {
-		// Cap is too small to fit the warning; store a hard-cut prefix.
-		return s[:capBytes], true, warning
+	dstDir, err := GetArtifactDir(dstWorkspace, dstSlot)
+	if err != nil {
+		return err
 	}
-	prefixLen := capBytes - len(suffix)
-	return s[:prefixLen] + suffix, true, warning
+	if err := os.MkdirAll(filepath.Dir(dstDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dstDir); err != nil {
+		return err
+	}
+	if err := os.Rename(srcDir, dstDir); err == nil {
+		return nil
+	}
+
+	if err := copyArtifactDir(srcDir, dstDir); err != nil {
+		return err
+	}
+	return os.RemoveAll(srcDir)
+}
+
+func copyArtifactDir(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dstDir, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("unsupported artifact entry type %q in %s", entry.Type().String(), path)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+
+		dstFile, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			_ = srcFile.Close()
+			return err
+		}
+		if _, err := io.Copy(dstFile, srcFile); err != nil {
+			_ = dstFile.Close()
+			_ = srcFile.Close()
+			return err
+		}
+		if err := dstFile.Close(); err != nil {
+			_ = srcFile.Close()
+			return err
+		}
+		return srcFile.Close()
+	})
 }
 
 var slotOutputTemplateRE = regexp.MustCompile(`\{\{\s*slot_(\d+)\.output\s*\}\}`)
@@ -130,8 +221,8 @@ var slotOutputTemplateRE = regexp.MustCompile(`\{\{\s*slot_(\d+)\.output\s*\}\}`
 // substituteSlotOutputTemplates replaces {{slot_N.output}} placeholders using
 // artifacts from dependency slots only. Placeholders for non-dependency slots
 // or missing artifacts are left unchanged.
-func substituteSlotOutputTemplates(task, workspace string, dependsOn []int, store *ArtifactStore) (string, []int) {
-	if strings.TrimSpace(task) == "" || store == nil || len(dependsOn) == 0 {
+func substituteSlotOutputTemplates(task, workspace string, dependsOn []int) (string, []int) {
+	if strings.TrimSpace(task) == "" || len(dependsOn) == 0 {
 		return task, nil
 	}
 
@@ -153,12 +244,12 @@ func substituteSlotOutputTemplates(task, workspace string, dependsOn []int, stor
 		if _, ok := depSet[n]; !ok {
 			return m
 		}
-		art, ok := store.Get(workspace, n)
-		if !ok {
+		output, err := readArtifactOutputField(workspace, n)
+		if err != nil {
 			missingSet[n] = struct{}{}
 			return m
 		}
-		return art.Output
+		return output
 	})
 
 	missing := make([]int, 0, len(missingSet))
@@ -168,4 +259,3 @@ func substituteSlotOutputTemplates(task, workspace string, dependsOn []int, stor
 	sort.Ints(missing)
 	return out, missing
 }
-

@@ -106,6 +106,42 @@ type RawAgentMode struct {
 	ProtectSlotZero *bool `yaml:"protect_slot_zero"`
 }
 
+type RawAgentHooks struct {
+	OnStart string `yaml:"on_start"`
+	OnCheck string `yaml:"on_check"`
+	OnEnd   string `yaml:"on_end"`
+}
+
+type RawAgentConfig struct {
+	Command       string            `yaml:"command"`
+	Args          []string          `yaml:"args"`
+	ReadyPattern  string            `yaml:"ready_pattern"`
+	IdlePattern   string            `yaml:"idle_pattern"`
+	OutputMode    string            `yaml:"output_mode"`
+	Hooks         RawAgentHooks     `yaml:"hooks"`
+	Description   string            `yaml:"description"`
+	Env           map[string]string `yaml:"env"`
+	PromptAsArg   bool              `yaml:"prompt_as_arg"`
+	PromptFlag    string            `yaml:"prompt_flag"`
+	SpawnMode     string            `yaml:"spawn_mode"`
+	ResponseFence bool              `yaml:"response_fence"`
+	PipeTask      bool              `yaml:"pipe_task"`
+	Models        []string          `yaml:"models"`
+	DefaultModel  string            `yaml:"default_model"`
+	ModelFlag     string            `yaml:"model_flag"`
+
+	HookDelivery      string                 `yaml:"hook_delivery"`
+	HookSettingsFlag  string                 `yaml:"hook_settings_flag"`
+	HookSettingsDir   string                 `yaml:"hook_settings_dir"`
+	HookSettingsFile  string                 `yaml:"hook_settings_file"`
+	HookFormat        string                 `yaml:"hook_format"`
+	HookEvents        map[string]string      `yaml:"hook_events"`
+	HookEntry         map[string]interface{} `yaml:"hook_entry"`
+	HookWrapper       map[string]interface{} `yaml:"hook_wrapper"`
+	HookOutput        map[string]interface{} `yaml:"hook_output"`
+	HookResponseField string                 `yaml:"hook_response_field"`
+}
+
 type RawProjectWorkspaceProject struct {
 	RootMarker *string `yaml:"root_marker"`
 	CWDMode    *string `yaml:"cwd_mode"`
@@ -194,7 +230,7 @@ type RawConfig struct {
 	AgentMode                *RawAgentMode              `yaml:"agent_mode"`
 	Limits                   *RawLimits                 `yaml:"limits"`
 	Logging                  *RawLoggingConfig          `yaml:"logging"`
-	Agents                   map[string]AgentConfig     `yaml:"agents"`
+	Agents                   map[string]RawAgentConfig  `yaml:"agents"`
 	ProjectWorkspace         *RawProjectWorkspaceConfig `yaml:"-"`
 }
 
@@ -370,15 +406,28 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 
 	if overlay.Agents != nil {
 		if out.Agents == nil {
-			out.Agents = make(map[string]AgentConfig, len(overlay.Agents))
+			out.Agents = make(map[string]RawAgentConfig, len(overlay.Agents))
 		}
 		for name, agent := range overlay.Agents {
 			if base, ok := out.Agents[name]; ok {
 				// Carry forward base fields when the overlay omits them.
 				// This lets users partially override an agent (e.g. just
-				// change args) without losing idle_pattern, response_fence, etc.
+				// change args) without losing idle_pattern, output_mode,
+				// response_fence, etc.
 				if agent.IdlePattern == "" {
 					agent.IdlePattern = base.IdlePattern
+				}
+				if agent.OutputMode == "" {
+					agent.OutputMode = base.OutputMode
+				}
+				if agent.Hooks.OnStart == "" {
+					agent.Hooks.OnStart = base.Hooks.OnStart
+				}
+				if agent.Hooks.OnCheck == "" {
+					agent.Hooks.OnCheck = base.Hooks.OnCheck
+				}
+				if agent.Hooks.OnEnd == "" {
+					agent.Hooks.OnEnd = base.Hooks.OnEnd
 				}
 				if !agent.ResponseFence {
 					agent.ResponseFence = base.ResponseFence
@@ -400,6 +449,30 @@ func (c RawConfig) merge(overlay RawConfig) RawConfig {
 				}
 				if agent.ModelFlag == "" {
 					agent.ModelFlag = base.ModelFlag
+				}
+				if agent.HookDelivery == "" {
+					agent.HookDelivery = base.HookDelivery
+				}
+				if agent.HookSettingsFlag == "" {
+					agent.HookSettingsFlag = base.HookSettingsFlag
+				}
+				if agent.HookSettingsDir == "" {
+					agent.HookSettingsDir = base.HookSettingsDir
+				}
+				if agent.HookSettingsFile == "" {
+					agent.HookSettingsFile = base.HookSettingsFile
+				}
+				if agent.HookFormat == "" {
+					agent.HookFormat = base.HookFormat
+				}
+				if agent.HookEvents == nil {
+					agent.HookEvents = base.HookEvents
+				}
+				if agent.HookEntry == nil {
+					agent.HookEntry = base.HookEntry
+				}
+				if agent.HookWrapper == nil {
+					agent.HookWrapper = base.HookWrapper
 				}
 			}
 			out.Agents[name] = agent

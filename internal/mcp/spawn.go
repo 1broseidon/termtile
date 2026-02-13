@@ -2,14 +2,17 @@ package mcp
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/1broseidon/termtile/internal/config"
 )
 
 // spawnAgentWithDependencies waits for depends_on slots (if provided) then
-// spawns the agent exactly as current behavior.
-func (s *Server) spawnAgentWithDependencies(workspaceName, agentType, cwd, agentCmd, spawnMode string, responseFence bool, agentCfg config.AgentConfig, dependsOn []int, dependsOnTimeout int) (string, int, error) {
+// spawns the agent exactly as current behavior. The optional preCommandFn is
+// called after the window/session is created but before the agent command is
+// sent (used for project_file hook injection).
+func (s *Server) spawnAgentWithDependencies(workspaceName, agentType, cwd, agentCmd, spawnMode string, responseFence bool, agentCfg config.AgentConfig, dependsOn []int, dependsOnTimeout int, preCommandFn func(string, int) error) (string, int, error) {
 	if len(dependsOn) > 0 {
 		if err := s.waitForDependencies(workspaceName, dependsOn, dependsOnTimeout); err != nil {
 			return "", 0, err
@@ -22,12 +25,31 @@ func (s *Server) spawnAgentWithDependencies(workspaceName, agentType, cwd, agent
 		if err != nil {
 			return "", 0, err
 		}
+		if _, err := EnsureArtifactDir(workspaceName, slot); err != nil {
+			log.Printf("Warning: failed to create artifact directory for workspace %q slot %d: %v", workspaceName, slot, err)
+		}
+		// Clean stale output so wait_for_idle can detect fresh hook output.
+		// Preserve context.md and checkpoint.json placed by the orchestrator.
+		_ = CleanStaleOutput(workspaceName, slot)
+		if preCommandFn != nil {
+			if err := preCommandFn(workspaceName, slot); err != nil {
+				log.Printf("Warning: preCommandFn failed for workspace %q slot %d: %v", workspaceName, slot, err)
+			}
+		}
 		s.waitForShellAndSend(target, agentCmd)
 		return target, slot, nil
 	}
 
 	// Pane mode: spawn directly running the agent command.
-	return s.spawnPane(workspaceName, agentType, agentCmd, cwd, responseFence, agentCfg)
+	target, slot, err := s.spawnPane(workspaceName, agentType, agentCmd, cwd, responseFence, agentCfg)
+	if err != nil {
+		return "", 0, err
+	}
+	if _, err := EnsureArtifactDir(workspaceName, slot); err != nil {
+		log.Printf("Warning: failed to create artifact directory for workspace %q slot %d: %v", workspaceName, slot, err)
+	}
+	_ = CleanStaleOutput(workspaceName, slot)
+	return target, slot, nil
 }
 
 // renderSpawnTemplate fills {{dir}} and {{cmd}} placeholders in a terminal

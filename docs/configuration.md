@@ -1,62 +1,182 @@
 # Configuration
 
-termtile uses a YAML-based configuration system that supports inheritance, include directives, and live reloading.
+termtile is configured with YAML at:
 
-## Configuration File
+- `~/.config/termtile/config.yaml`
 
-The default configuration file is located at `~/.config/termtile/config.yaml`.
+## Project Workspace Files (v1)
 
-## Project Workspace Configuration (v1)
+Project-local workspace config is stored in:
 
-termtile also supports project-local workspace settings:
+- `.termtile/workspace.yaml` (shared)
+- `.termtile/local.yaml` (local overrides)
 
-- `.termtile/workspace.yaml` (committed): project workspace binding and defaults
-- `.termtile/local.yaml` (gitignored): local pull/push sync snapshot
-- `~/.config/termtile/workspaces/<workspace>.json`: canonical workspace snapshot
-
-Initialize a project file:
+Initialize or update project linkage:
 
 ```bash
 termtile workspace init --workspace my-workspace
-```
-
-Update only the project workspace binding:
-
-```bash
 termtile workspace link --workspace my-workspace
 ```
 
-Sync selected fields between project-local and canonical snapshots:
+Sync between project-local and canonical snapshots:
 
 ```bash
 termtile workspace sync pull
 termtile workspace sync push
 ```
 
-Default synced fields are:
-
-- `layout`
-- `terminals`
-- `agent_mode`
-
 ### Precedence
 
-Resolver and config precedence for workspace selection/overrides:
-
 1. CLI/tool explicit args
-2. Request-scoped hints (for example `source_workspace`)
+2. Request-scoped hints (`source_workspace`)
 3. `.termtile/local.yaml`
 4. `.termtile/workspace.yaml`
 5. `~/.config/termtile/config.yaml`
 6. Built-in defaults
 
-### Include Directives
-You can split your configuration into multiple files using the `include` key. This supports single files or entire directories.
+## Agent Configuration (MCP)
+
+Agents are configured under `agents:`. These fields control spawn behavior, task delivery, hook integration, model selection, and output capture.
+
+### Agent fields
+
+| Field | Type | Default / behavior |
+|---|---|---|
+| `command` | string | Required executable name/path. |
+| `args` | list[string] | Extra CLI args. |
+| `description` | string | Optional description for tooling/UI. |
+| `env` | map[string]string | Extra env vars for spawned process. |
+| `spawn_mode` | `pane` \| `window` | Defaults to `pane` unless overridden by request or config. |
+| `ready_pattern` | string | If set, used to wait for ready prompt before sending task. |
+| `idle_pattern` | string | Used by `checkIdle` content-based idle detection (list/dependency checks). |
+| `output_mode` | `hooks` \| `tags` \| `terminal` | Effective default is `hooks` when empty. |
+| `hooks.on_start` | string | Hook command for session start context injection. |
+| `hooks.on_check` | string | Hook command for mid-run steering/checkpoint ingestion. |
+| `hooks.on_end` | string | Hook command for final output capture. |
+| `hook_delivery` | `cli_flag` \| `project_file` \| `none` | Native hook delivery mechanism. |
+| `hook_settings_flag` | string | CLI flag used when `hook_delivery: cli_flag` (for example `--settings`). |
+| `hook_settings_dir` | string | Settings directory for `project_file` injection (for example `.gemini`). |
+| `hook_settings_file` | string | Settings filename for `project_file` injection (for example `settings.json`). |
+| `hook_events` | map[string]string | Abstract hook names (`on_start`, `on_check`, `on_end`) to native event names. |
+| `hook_entry` | map[string]any | Template for one event entry; supports substitutions. |
+| `hook_wrapper` | map[string]any | Top-level hook config template; `"{{events}}"` is replaced by rendered events map. |
+| `hook_output` | map[string]any | Template returned by `termtile hook start/check`; supports `"{{context}}"`. |
+| `hook_response_field` | string | Field to read from hook context stdin in `hook emit --auto` before transcript fallback. |
+| `response_fence` | bool | Legacy fence wrapping/counting support (still used by `checkIdle` tiers). |
+| `prompt_as_arg` | bool | If true, task is passed as CLI argument (optionally via `prompt_flag`). |
+| `prompt_flag` | string | Flag used with `prompt_as_arg` (for example `-i`). |
+| `pipe_task` | bool | If true, task is piped via stdin (`printf ... | command`). |
+| `models` | list[string] | Allowed/known model list for this agent. |
+| `default_model` | string | Model selected when request does not provide one. |
+| `model_flag` | string | Flag used to pass selected model (defaults to `--model` when empty). |
+
+### Hook template substitutions
+
+`hook_entry` replacements:
+
+- `{{command}}`: resolved hook command string
+- `{{event}}`: native event name from `hook_events`
+- `{{name}}`: abstract hook name (`on_start`/`on_check`/`on_end`)
+
+`hook_wrapper` replacement:
+
+- `{{events}}`: rendered event map
+
+`hook_output` replacement:
+
+- `{{context}}`: context/checkpoint payload emitted by `termtile hook start/check`
+
+### Realistic multi-agent example
+
+```yaml
+agents:
+  claude:
+    command: "claude"
+    args: ["--dangerously-skip-permissions"]
+    description: "Claude Code CLI agent"
+    spawn_mode: "window"
+    output_mode: "hooks"
+    prompt_as_arg: true
+    idle_pattern: "❯"
+    response_fence: true
+    models: ["sonnet", "haiku", "opus"]
+    hook_delivery: "cli_flag"
+    hook_settings_flag: "--settings"
+    hook_events:
+      on_start: "SessionStart"
+      on_check: "PostToolUse"
+      on_end: "Stop"
+    hook_entry:
+      hooks:
+        - type: "command"
+          command: "{{command}}"
+    hook_wrapper:
+      hooks: "{{events}}"
+    hook_output:
+      hookSpecificOutput:
+        additionalContext: "{{context}}"
+
+  gemini:
+    command: "gemini"
+    args: ["--approval-mode", "auto_edit"]
+    description: "Google Gemini CLI"
+    spawn_mode: "window"
+    output_mode: "hooks"
+    prompt_as_arg: true
+    prompt_flag: "-i"
+    idle_pattern: ">"
+    response_fence: true
+    hook_delivery: "project_file"
+    hook_settings_dir: ".gemini"
+    hook_settings_file: "settings.json"
+    hook_response_field: "prompt_response"
+    hook_events:
+      on_start: "BeforeAgent"
+      on_check: "AfterTool"
+      on_end: "AfterAgent"
+    hook_entry:
+      matcher: "*"
+      hooks:
+        - type: "command"
+          command: "{{command}}"
+    hook_wrapper:
+      hooks: "{{events}}"
+    hook_output:
+      decision: "allow"
+      hookSpecificOutput:
+        additionalContext: "{{context}}"
+
+  codex:
+    command: "codex"
+    args:
+      - "--dangerously-bypass-approvals-and-sandbox"
+      - "--no-alt-screen"
+      - "-c"
+      - "notice.model_migrations={}"
+      - "-c"
+      - "notice.hide_rate_limit_switch_prompt=true"
+    description: "OpenAI Codex CLI agent"
+    spawn_mode: "window"
+    output_mode: "hooks"
+    prompt_as_arg: true
+    idle_pattern: "›"
+    response_fence: true
+    hook_delivery: "none"    # fileWriteInstructions appended to task
+    models: ["gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.1-codex-max", "gpt-5.2", "gpt-5.1-codex-mini"]
+    default_model: "gpt-5.2-codex"
+    model_flag: "--model"
+```
+
+## Include Directives
+
+Split your configuration into multiple files:
+
 ```yaml
 include:
   - config.d/hotkeys.yaml
   - layouts/
 ```
+
 - Relative paths are resolved from the current file.
 - Directories include all `.yaml` and `.yml` files in alphabetical order.
 - Cyclic includes are automatically detected and prevented.
@@ -67,59 +187,49 @@ include:
 |---|---|---|---|
 | `hotkey` | string | `Mod4-Mod1-t` | Global hotkey to trigger tiling. |
 | `gap_size` | int | `0` | Gap between tiled windows in pixels. |
-| `screen_padding` | object | `{top:0, bottom:0, left:0, right:0}` | Padding around the screen edges (see Margins below). |
+| `screen_padding` | object | `{top:0, bottom:0, left:0, right:0}` | Padding around the screen edges. |
 | `default_layout` | string | (first layout) | Layout applied on daemon startup. |
-| `preferred_terminal` | string | (auto-detected) | Preferred terminal class to use when spawning. |
-| `terminal_sort` | string | `position` | Order of windows: `position`, `window_id`, `client_list`, `active_first`. |
-| `log_level` | string | `info` | Simple log level: `debug`, `info`, `warning`, `error`. See `logging` section for advanced options. |
-| `display` | string | (inherited) | Optional X11 display override for window-mode agent spawns (e.g. `:1`). |
-| `xauthority` | string | (inherited) | Optional Xauthority path override used with `display` for window-mode spawns. |
+| `preferred_terminal` | string | (auto-detected) | Preferred terminal class for spawning. |
+| `terminal_sort` | string | `position` | Window order: `position`, `window_id`, `client_list`, `active_first`. |
+| `log_level` | string | `info` | Simple log level: `debug`, `info`, `warning`, `error`. |
+| `display` | string | (inherited) | X11 display override for window-mode agent spawns. |
+| `xauthority` | string | (inherited) | Xauthority path override for window-mode spawns. |
 
 ## Hotkeys
 
-Hotkeys use the format `[Modifier]-[Key]`.
-Modifiers: `Mod4` (Super), `Mod1` (Alt), `Control`, `Shift`.
-
 ```yaml
-hotkey: "Mod4-Mod1-t"                          # Main tiling hotkey
-cycle_layout_hotkey: "Mod4-Mod1-bracketright"   # Cycle to next layout
-cycle_layout_reverse_hotkey: ""                 # Cycle to previous layout (optional)
-undo_hotkey: "Mod4-Mod1-u"                      # Undo last layout change
-move_mode_hotkey: "Mod4-Mod1-r"                 # Enter move/relocate mode (default: Mod4-Mod1-r)
-terminal_add_hotkey: "Mod4-Mod1-n"              # Add new terminal to active workspace (default: Mod4-Mod1-n)
-palette_hotkey: "Mod4-Mod1-g"                   # Open command palette (default: Mod4-Mod1-g)
+hotkey: "Mod4-Mod1-t"
+cycle_layout_hotkey: "Mod4-Mod1-bracketright"
+cycle_layout_reverse_hotkey: ""
+undo_hotkey: "Mod4-Mod1-u"
+move_mode_hotkey: "Mod4-Mod1-r"
+terminal_add_hotkey: "Mod4-Mod1-n"
+palette_hotkey: "Mod4-Mod1-g"
 ```
 
-### Move Mode Interaction
+Modifiers: `Mod4` (Super), `Mod1` (Alt), `Control`, `Shift`.
 
-`move_mode_hotkey` enters a phase-based interaction model and shows a compact on-screen key legend:
+### Move Mode
 
-- `select`: cycle terminals (`Arrow keys`), grab (`Enter`), request delete (`d`), insert after (`n`), append (`a`), cancel (`Esc`)
-- `move`: after grabbing, pick a target slot (`Arrow keys`) and confirm move/swap (`Enter`)
-- `confirm-delete`: confirm deletion (`Enter`) or cancel and return to select (`Esc`)
+`move_mode_hotkey` enters a phase-based interaction with on-screen key legend:
 
-
-### Move Mode Timeout
+- **select**: cycle terminals (`Arrow keys`), grab (`Enter`), delete (`d`), insert (`n`), append (`a`), cancel (`Esc`)
+- **move**: pick target slot (`Arrow keys`), confirm (`Enter`)
+- **confirm-delete**: confirm (`Enter`) or cancel (`Esc`)
 
 ```yaml
-move_mode_timeout: 10  # Timeout in seconds (default: 10)
+move_mode_timeout: 10  # seconds (default: 10)
 ```
 
 ## Command Palette
 
-The command palette provides a quick launcher for common actions.
-
 ```yaml
-palette_hotkey: "Mod4-Mod1-g"      # Hotkey to open palette (default: Mod4-Mod1-g)
-palette_backend: "auto"             # Backend: auto, rofi, fuzzel, dmenu, wofi (default: auto)
-palette_fuzzy_matching: false       # Enable fuzzy matching (default: false)
+palette_hotkey: "Mod4-Mod1-g"
+palette_backend: "auto"          # auto, rofi, fuzzel, dmenu, wofi
+palette_fuzzy_matching: false
 ```
 
-The palette automatically detects available backends (`rofi`, `fuzzel`, `dmenu`, `wofi`) when set to `auto`.
-
 ## Terminal Detection
-
-termtile identifies terminals by their X11 `WM_CLASS`.
 
 ```yaml
 terminal_classes:
@@ -129,17 +239,15 @@ terminal_classes:
 ```
 
 ### Spawn Commands
-Define how to launch new terminals. This is a map of terminal class to command template.
+
 ```yaml
 terminal_spawn_commands:
   Alacritty: "alacritty --working-directory {{dir}} -e {{cmd}}"
   kitty: "kitty --directory {{dir}} {{cmd}}"
 ```
 
-Available template variables: `{{dir}}` (working directory), `{{cmd}}` (command to execute).
-
 ### Per-Terminal Margins
-Adjust for internal padding of specific terminals.
+
 ```yaml
 terminal_margins:
   "Gnome-terminal":
@@ -150,8 +258,6 @@ terminal_margins:
 ```
 
 ## Layouts
-
-Layouts can be custom-defined or inherit from built-in presets.
 
 ```yaml
 layouts:
@@ -166,57 +272,33 @@ layouts:
       height_percent: 100
 ```
 
-See the [Layouts Documentation](layouts.md) for more details.
+See the [Layouts Documentation](layouts.md) for details.
 
 ## Agent Mode
 
-Configure how termtile manages terminal multiplexers (tmux/screen) for agent orchestration.
-
 ```yaml
 agent_mode:
-  multiplexer: "auto"                    # Which multiplexer to use: auto, tmux, screen (default: auto)
-  manage_multiplexer_config: true        # Let termtile manage multiplexer config (default: true)
-  protect_slot_zero: true                # Protect slot 0 from being killed (default: true)
+  multiplexer: "auto"
+  manage_multiplexer_config: true
+  protect_slot_zero: true
 ```
 
-- **`multiplexer`**: Specifies which terminal multiplexer to use. `auto` will detect and prefer tmux over screen.
-- **`manage_multiplexer_config`**: When `true`, termtile generates an optimized multiplexer config file (e.g., `~/.config/termtile/tmux.conf`). Set to `false` to use your own tmux/screen config entirely.
-- **`protect_slot_zero`**: When `true`, prevents slot 0 from being killed via MCP tools, providing a safe anchor slot.
+- `protect_slot_zero: true` blocks `kill_agent` for slot `0` in agent-mode workspaces.
 
 ## Logging
 
-Configure structured logging for agent actions and system events.
-
 ```yaml
 logging:
-  enabled: false                         # Enable structured logging (default: false)
-  level: "info"                          # Log level: debug, info, warn, error (default: info)
-  file: "~/.local/share/termtile/agent-actions.log"  # Log file path
-  max_size_mb: 10                        # Maximum log file size before rotation (default: 10)
-  max_files: 3                           # Number of rotated files to keep (default: 3)
-  include_content: false                 # Include full command/output content in logs (default: false)
-  preview_length: 100                    # Length of content preview when include_content is false (default: 100)
-```
-
-**Note**: The simple `log_level` field is still supported for basic logging, but the `logging` section provides more comprehensive control.
-
-
-## Agent Orchestration
-
-Configure how AI agents are managed via MCP.
-
-```yaml
-agents:
-  claude:
-    command: "claude"
-    idle_pattern: "❯"
-    spawn_mode: "window"
-    response_fence: true
+  enabled: false
+  level: "info"
+  file: "~/.local/share/termtile/agent-actions.log"
+  max_size_mb: 10
+  max_files: 3
+  include_content: false
+  preview_length: 50
 ```
 
 ## Limits
-
-Prevent resource exhaustion.
 
 ```yaml
 limits:
@@ -225,11 +307,10 @@ limits:
   max_terminals_total: 20
 ```
 
-## Config Management CLI
+## Config CLI
 
 | Command | Description |
 |---|---|
-| `termtile config validate` | Check config for syntax and schema errors. |
-| `termtile config print --effective` | Show the final merged configuration. |
-| `termtile config explain <key>` | Show value and exactly which file/line it came from. |
-| `termtile tui` | Interactive TUI for editing common settings. |
+| `termtile config validate` | Validate config and schema. |
+| `termtile config print --effective` | Print merged effective config. |
+| `termtile config explain <yaml.path>` | Show resolved value and source location. |

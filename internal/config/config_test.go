@@ -33,6 +33,43 @@ func TestLoadFromPath_EmptyFileUsesDefaults(t *testing.T) {
 	if res.Config.DefaultLayout != DefaultBuiltinLayout {
 		t.Fatalf("expected default_layout %q, got %q", DefaultBuiltinLayout, res.Config.DefaultLayout)
 	}
+	codex := res.Config.Agents["codex"]
+	if codex.OutputMode != "hooks" {
+		t.Fatalf("expected default codex output_mode hooks, got %q", codex.OutputMode)
+	}
+}
+
+func TestLoadFromPath_AgentOutputMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+agents:
+  tags-agent:
+    command: tags-agent
+    output_mode: tags
+  terminal-agent:
+    command: terminal-agent
+    output_mode: terminal
+  default-agent:
+    command: default-agent
+`
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := res.Config.Agents["tags-agent"].OutputMode; got != "tags" {
+		t.Fatalf("expected tags-agent output_mode tags, got %q", got)
+	}
+	if got := res.Config.Agents["terminal-agent"].OutputMode; got != "terminal" {
+		t.Fatalf("expected terminal-agent output_mode terminal, got %q", got)
+	}
+	if got := res.Config.Agents["default-agent"].OutputMode; got != "hooks" {
+		t.Fatalf("expected default-agent output_mode hooks, got %q", got)
+	}
 }
 
 func TestLoadFromPath_PaletteFuzzyMatching(t *testing.T) {
@@ -714,5 +751,102 @@ workspace: ws-main
 	}
 	if !strings.Contains(err.Error(), workspacePath+":") {
 		t.Fatalf("expected source context for workspace file, got %v", err)
+	}
+}
+
+func TestDefaultConfig_HookDeliveryFields(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Claude: cli_flag delivery.
+	claude := cfg.Agents["claude"]
+	if claude.HookDelivery != "cli_flag" {
+		t.Errorf("expected claude HookDelivery=cli_flag, got %q", claude.HookDelivery)
+	}
+	if claude.HookSettingsFlag != "--settings" {
+		t.Errorf("expected claude HookSettingsFlag=--settings, got %q", claude.HookSettingsFlag)
+	}
+	if claude.HookEvents == nil {
+		t.Fatal("expected claude HookEvents to be non-nil")
+	}
+	if claude.HookEvents["on_start"] != "SessionStart" {
+		t.Errorf("expected claude HookEvents[on_start]=SessionStart, got %q", claude.HookEvents["on_start"])
+	}
+	if claude.HookEntry == nil {
+		t.Fatal("expected claude HookEntry to be non-nil")
+	}
+	if claude.HookWrapper == nil {
+		t.Fatal("expected claude HookWrapper to be non-nil")
+	}
+
+	// Gemini: project_file delivery.
+	gemini := cfg.Agents["gemini"]
+	if gemini.HookDelivery != "project_file" {
+		t.Errorf("expected gemini HookDelivery=project_file, got %q", gemini.HookDelivery)
+	}
+	if gemini.HookSettingsDir != ".gemini" {
+		t.Errorf("expected gemini HookSettingsDir=.gemini, got %q", gemini.HookSettingsDir)
+	}
+	if gemini.HookSettingsFile != "settings.json" {
+		t.Errorf("expected gemini HookSettingsFile=settings.json, got %q", gemini.HookSettingsFile)
+	}
+	if gemini.HookEvents == nil {
+		t.Fatal("expected gemini HookEvents to be non-nil")
+	}
+	if gemini.HookEvents["on_start"] != "BeforeAgent" {
+		t.Errorf("expected gemini HookEvents[on_start]=BeforeAgent, got %q", gemini.HookEvents["on_start"])
+	}
+
+	// Codex: no hook delivery.
+	codex := cfg.Agents["codex"]
+	if codex.HookDelivery != "" {
+		t.Errorf("expected codex HookDelivery to be empty, got %q", codex.HookDelivery)
+	}
+	if codex.HookEvents != nil {
+		t.Errorf("expected codex HookEvents to be nil, got %v", codex.HookEvents)
+	}
+}
+
+func TestLoadFromPath_HookFieldsMerge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+agents:
+  claude:
+    hook_delivery: project_file
+    hook_settings_dir: .claude-hooks
+    hook_settings_file: hooks.json
+  gemini:
+    hook_settings_file: custom.json
+`
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := LoadFromPath(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Claude: user overrides should apply.
+	claude := res.Config.Agents["claude"]
+	if claude.HookDelivery != "project_file" {
+		t.Errorf("expected claude HookDelivery=project_file, got %q", claude.HookDelivery)
+	}
+	if claude.HookSettingsDir != ".claude-hooks" {
+		t.Errorf("expected claude HookSettingsDir=.claude-hooks, got %q", claude.HookSettingsDir)
+	}
+	// HookEvents should carry forward from default since user didn't override.
+	if claude.HookEvents == nil || claude.HookEvents["on_start"] != "SessionStart" {
+		t.Errorf("expected claude HookEvents to carry forward from defaults, got %v", claude.HookEvents)
+	}
+
+	// Gemini: only hook_settings_file overridden.
+	gemini := res.Config.Agents["gemini"]
+	if gemini.HookSettingsFile != "custom.json" {
+		t.Errorf("expected gemini HookSettingsFile=custom.json, got %q", gemini.HookSettingsFile)
+	}
+	// HookDelivery should carry forward from default.
+	if gemini.HookDelivery != "project_file" {
+		t.Errorf("expected gemini HookDelivery=project_file, got %q", gemini.HookDelivery)
 	}
 }

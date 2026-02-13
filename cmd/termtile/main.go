@@ -66,6 +66,8 @@ func main() {
 		os.Exit(runTUI(os.Args[2:]))
 	case "mcp":
 		os.Exit(runMCP(os.Args[2:]))
+	case "hook":
+		os.Exit(runHook(os.Args[2:]))
 	case "help", "-h", "--help":
 		printMainUsage(os.Stdout)
 		os.Exit(0)
@@ -117,6 +119,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "  mcp serve           Start MCP server (stdio transport)")
 	fmt.Fprintln(w, "  mcp cleanup         List/clean orphaned termtile tmux sessions")
+	fmt.Fprintln(w, "  hook emit           Write hook output artifact for a workspace slot")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run 'termtile <command> --help' for command-specific options.")
 }
@@ -883,9 +886,13 @@ func runDaemon() {
 
 	reconciler := daemon.NewReconciler(daemon.ReconcilerConfig{
 		Interval:        10 * time.Second,
-		CleanupOrphaned: false, // Disabled until slot tracking is populated on workspace load
+		CleanupOrphaned: true,
 		Logger:          syncLogger,
 	}, stateSynchronizer, windowLister)
+
+	// Run an immediate reconciliation pass on startup to clean stale
+	// workspace entries from a previous daemon lifecycle.
+	reconciler.ReconcileNow()
 
 	// Start reconciler in background
 	reconcilerCtx, reconcilerCancel := context.WithCancel(context.Background())

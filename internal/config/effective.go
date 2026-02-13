@@ -167,11 +167,56 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 		if cfg.Agents == nil {
 			cfg.Agents = make(map[string]AgentConfig, len(raw.Agents))
 		}
-		for name, agentCfg := range raw.Agents {
+		for name, rawAgentCfg := range raw.Agents {
+			agentCfg := AgentConfig{
+				Command:       rawAgentCfg.Command,
+				Args:          rawAgentCfg.Args,
+				ReadyPattern:  rawAgentCfg.ReadyPattern,
+				IdlePattern:   rawAgentCfg.IdlePattern,
+				OutputMode:    rawAgentCfg.OutputMode,
+				Hooks: AgentHooks{
+					OnStart: rawAgentCfg.Hooks.OnStart,
+					OnCheck: rawAgentCfg.Hooks.OnCheck,
+					OnEnd:   rawAgentCfg.Hooks.OnEnd,
+				},
+				Description:   rawAgentCfg.Description,
+				Env:           rawAgentCfg.Env,
+				PromptAsArg:   rawAgentCfg.PromptAsArg,
+				PromptFlag:    rawAgentCfg.PromptFlag,
+				SpawnMode:     rawAgentCfg.SpawnMode,
+				ResponseFence: rawAgentCfg.ResponseFence,
+				PipeTask:      rawAgentCfg.PipeTask,
+				Models:        rawAgentCfg.Models,
+				DefaultModel:  rawAgentCfg.DefaultModel,
+				ModelFlag:     rawAgentCfg.ModelFlag,
+
+				HookDelivery:     rawAgentCfg.HookDelivery,
+				HookSettingsFlag: rawAgentCfg.HookSettingsFlag,
+				HookSettingsDir:  rawAgentCfg.HookSettingsDir,
+				HookSettingsFile: rawAgentCfg.HookSettingsFile,
+				HookFormat:       rawAgentCfg.HookFormat,
+				HookEvents:        rawAgentCfg.HookEvents,
+				HookEntry:         rawAgentCfg.HookEntry,
+				HookWrapper:       rawAgentCfg.HookWrapper,
+				HookOutput:        rawAgentCfg.HookOutput,
+				HookResponseField: rawAgentCfg.HookResponseField,
+			}
 			if base, ok := cfg.Agents[name]; ok {
 				// Merge: carry forward default fields the user didn't set.
 				if agentCfg.IdlePattern == "" {
 					agentCfg.IdlePattern = base.IdlePattern
+				}
+				if agentCfg.OutputMode == "" {
+					agentCfg.OutputMode = base.OutputMode
+				}
+				if agentCfg.Hooks.OnStart == "" {
+					agentCfg.Hooks.OnStart = base.Hooks.OnStart
+				}
+				if agentCfg.Hooks.OnCheck == "" {
+					agentCfg.Hooks.OnCheck = base.Hooks.OnCheck
+				}
+				if agentCfg.Hooks.OnEnd == "" {
+					agentCfg.Hooks.OnEnd = base.Hooks.OnEnd
 				}
 				if !agentCfg.ResponseFence {
 					agentCfg.ResponseFence = base.ResponseFence
@@ -190,6 +235,36 @@ func BuildEffectiveConfig(raw RawConfig) (*Config, map[string]string, error) {
 				}
 				if agentCfg.ModelFlag == "" {
 					agentCfg.ModelFlag = base.ModelFlag
+				}
+				if agentCfg.HookDelivery == "" {
+					agentCfg.HookDelivery = base.HookDelivery
+				}
+				if agentCfg.HookSettingsFlag == "" {
+					agentCfg.HookSettingsFlag = base.HookSettingsFlag
+				}
+				if agentCfg.HookSettingsDir == "" {
+					agentCfg.HookSettingsDir = base.HookSettingsDir
+				}
+				if agentCfg.HookSettingsFile == "" {
+					agentCfg.HookSettingsFile = base.HookSettingsFile
+				}
+				if agentCfg.HookFormat == "" {
+					agentCfg.HookFormat = base.HookFormat
+				}
+				if agentCfg.HookEvents == nil {
+					agentCfg.HookEvents = base.HookEvents
+				}
+				if agentCfg.HookEntry == nil {
+					agentCfg.HookEntry = base.HookEntry
+				}
+				if agentCfg.HookWrapper == nil {
+					agentCfg.HookWrapper = base.HookWrapper
+				}
+				if agentCfg.HookOutput == nil {
+					agentCfg.HookOutput = base.HookOutput
+				}
+				if agentCfg.HookResponseField == "" {
+					agentCfg.HookResponseField = base.HookResponseField
 				}
 			}
 			cfg.Agents[name] = agentCfg
@@ -243,6 +318,14 @@ func applyAgentDefaults(agents map[string]AgentConfig) {
 	for name, agentCfg := range agents {
 		if strings.TrimSpace(agentCfg.ModelFlag) == "" {
 			agentCfg.ModelFlag = "--model"
+		}
+		agentCfg.OutputMode = strings.TrimSpace(agentCfg.OutputMode)
+		if agentCfg.OutputMode == "" {
+			agentCfg.OutputMode = "hooks"
+		}
+		agentCfg.HookFormat = strings.TrimSpace(agentCfg.HookFormat)
+		if agentCfg.HookFormat == "" {
+			agentCfg.HookFormat = "json"
 		}
 		agents[name] = agentCfg
 	}

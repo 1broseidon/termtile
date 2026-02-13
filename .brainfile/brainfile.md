@@ -11,52 +11,38 @@ columns:
   - id: todo
     title: To Do
     tasks:
-      - id: task-75
-        title: "macOS backend: Accessibility API + CoreGraphics window management"
-        description: Implement internal/platform/backend_darwin.go behind //go:build darwin. Use CGWindowListCopyWindowInfo for window enumeration, AXUIElement for move/resize/minimize, CGDisplay for monitor enumeration, NSScreen.visibleFrame for usable work area. Requires cgo with -framework ApplicationServices -framework CoreGraphics.
+      - id: task-118
+        title: Set up GoReleaser for automated releases and package distribution
+        description: |-
+          Configure GoReleaser to automate binary builds and publishing on git tag push.
+
+          SETUP:
+          - Add .goreleaser.yaml at project root
+          - GitHub Actions workflow (.github/workflows/release.yml) triggered on tag push (v*)
+          - Build linux/amd64, linux/arm64, darwin/amd64, darwin/arm64
+          - Generate checksums and changelog from commit messages
+          - Publish to GitHub Releases with archives (tar.gz for linux/darwin)
+          - Include README.md and LICENSE in archives
+
+          OPTIONAL PACKAGE MANAGERS:
+          - Homebrew tap: create 1broseidon/homebrew-tap repo formula (or add to .goreleaser.yaml brews section)
+          - AUR: consider PKGBUILD for Arch users (can be manual/separate)
+          - Snap/Flatpak: skip for now
+
+          GORELEASER CONFIG NOTES:
+          - Binary name: termtile
+          - Main: ./cmd/termtile
+          - Module: github.com/1broseidon/termtile
+          - Strip debug symbols (ldflags -s -w)
+          - Inject version via ldflags if applicable
+
+          EXISTING: There is already a Makefile publish target and scripts/. Review what exists and integrate rather than duplicate.
         priority: high
         tags:
-          - macos
-          - platform
-          - darwin
-          - phase-2
-        subtasks:
-          - id: task-75-1
-            title: "Create cgo bridge: AXUIElement wrappers for window position/size get/set"
-            completed: false
-          - id: task-75-2
-            title: Implement CGWindowListCopyWindowInfo for window enumeration (PID, bounds, title, onscreen)
-            completed: false
-          - id: task-75-3
-            title: Implement CGDisplay + NSScreen for monitor enumeration with usable area (excludes Dock/menu bar)
-            completed: false
-          - id: task-75-4
-            title: Implement MoveResize via AXUIElementSetAttributeValue (kAXPositionAttribute, kAXSizeAttribute)
-            completed: false
-          - id: task-75-5
-            title: Add terminal detection via bundle ID matching (com.googlecode.iterm2, com.apple.Terminal, etc)
-            completed: false
-          - id: task-75-6
-            title: Handle Accessibility permission check and user-facing error message
-            completed: false
-      - id: task-76
-        title: "macOS hotkeys: Carbon HotKey API or golang.design/x/hotkey"
-        description: Port global hotkey support to macOS. Replace X11 XGrabKey with Carbon RegisterEventHotKey via cgo, or use golang.design/x/hotkey cross-platform library. Must handle main thread requirement on macOS. Replace X11 event loop with CFRunLoop for the daemon on darwin.
-        priority: medium
-        tags:
-          - macos
-          - hotkeys
-          - darwin
-          - phase-2
-      - id: task-77
-        title: "macOS terminal config: bundle ID matching and terminal_apps config"
-        description: Add terminal_apps config field for macOS bundle IDs alongside existing terminal_classes for Linux. Update terminal detector to use bundle IDs on darwin (com.googlecode.iterm2, com.github.wez.wezterm, com.apple.Terminal, dev.warp.Warp-Stable). Add to config.go, raw.go, effective.go with yaml tags.
-        priority: medium
-        tags:
-          - macos
-          - config
-          - terminal
-          - phase-2
+          - release
+          - goreleaser
+          - ci
+          - packaging
   - id: in-progress
     title: In Progress
     tasks: []
@@ -723,6 +709,527 @@ columns:
             - Use a single geometry contract for terminal and slot preview overlays
             - Hint legend must match implemented actions (d/n/a in select phase)
         assignee: codex
+      - id: task-105
+        title: "Agent hooks: add output_mode config field to agent definitions"
+        description: Add `output_mode` field to agent config supporting "hooks" (default), "tags", or "terminal" modes. The existing `response_fence` and `idle_pattern` fields become fallbacks for "tags" mode. This enables hook-based output detection as the primary mechanism.
+        priority: high
+        tags:
+          - hooks
+          - config
+          - agent
+          - feature
+        relatedFiles:
+          - internal/config/config.go
+          - internal/config/raw.go
+          - internal/config/effective.go
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: internal/config/config.go
+              description: Add OutputMode field to AgentConfig struct with yaml tag
+            - type: file
+              path: internal/config/raw.go
+              description: Add OutputMode to RawAgentConfig and merge logic
+            - type: file
+              path: internal/config/effective.go
+              description: Add OutputMode to BuildEffectiveConfig with default hooks
+          validation:
+            commands:
+              - go build ./...
+              - go vet ./...
+              - go test ./internal/config/...
+          constraints:
+            - Use string type for OutputMode (not enum) for YAML flexibility
+            - Default must be 'hooks' when field is empty
+            - Preserve backward compatibility - missing field = hooks mode
+        assignee: codex-slot-2
+      - id: task-106
+        title: "Agent hooks: artifact directory management for hook output"
+        description: Implement artifact directory creation and management at ~/.local/share/termtile/artifacts/{workspace}/{slot}/. Create directory on agent spawn, provide helper functions for reading artifacts, clean up on agent kill.
+        priority: high
+        tags:
+          - hooks
+          - artifacts
+          - mcp
+          - feature
+        relatedFiles:
+          - internal/mcp/artifacts.go
+          - internal/mcp/spawn.go
+          - internal/mcp/tools.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/artifacts.go
+              description: Artifact directory helpers (GetArtifactDir EnsureArtifactDir ReadArtifact CleanupArtifact)
+            - type: file
+              path: internal/mcp/spawn.go
+              description: Call EnsureArtifactDir when spawning agent
+            - type: file
+              path: internal/mcp/tools.go
+              description: Call CleanupArtifact in kill_agent handler
+          validation:
+            commands:
+              - go build ./...
+              - go vet ./...
+              - go test ./internal/mcp/...
+          constraints:
+            - Use XDG_DATA_HOME or ~/.local/share/termtile/artifacts as base
+            - Artifact file is output.json within slot directory
+            - Create directory with 0755 permissions
+            - Do not fail spawn if artifact dir creation fails (log warning)
+        assignee: codex-slot-3
+        subtasks:
+          - id: task-106-1
+            title: Add artifact directory helper functions in internal/mcp/artifacts.go
+            completed: true
+          - id: task-106-2
+            title: Integrate EnsureArtifactDir into spawn flow with non-fatal warning
+            completed: true
+          - id: task-106-3
+            title: Integrate CleanupArtifact into kill flow and run build/vet/tests
+            completed: true
+      - id: task-107
+        title: "Agent hooks: termtile hook emit CLI subcommand"
+        description: "Add `termtile hook emit` CLI subcommand that agents can call from their hooks to write structured output. Usage: `termtile hook emit --workspace NAME --slot N --output \"result...\"` or read from stdin. This is called by agent hook scripts to signal completion with output."
+        priority: high
+        tags:
+          - hooks
+          - cli
+          - feature
+        relatedFiles:
+          - cmd/termtile/hook.go
+          - cmd/termtile/main.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: cmd/termtile/hook.go
+              description: Hook subcommand with emit action
+            - type: file
+              path: cmd/termtile/main.go
+              description: Add hook case to command router
+          validation:
+            commands:
+              - go build ./...
+              - go vet ./...
+          constraints:
+            - Support --workspace and --slot and --output flags
+            - Support reading output from stdin if --output not provided
+            - Write JSON to artifact directory with status output timestamp fields
+            - Exit 0 on success and non-zero with error message on failure
+      - id: task-108
+        title: "Agent hooks: modify read_from_agent to support hook-based output"
+        description: Update read_from_agent MCP tool to check agent's output_mode config. When mode is "hooks", read from artifact file instead of tmux capture. Fall back to existing terminal scraping for "tags" or "terminal" modes.
+        priority: high
+        tags:
+          - hooks
+          - mcp
+          - feature
+        relatedFiles:
+          - internal/mcp/tools.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/tools.go
+              description: Update handleReadFromAgent to check output_mode and read from artifact when hooks mode
+          validation:
+            commands:
+              - go build ./...
+              - go vet ./...
+              - go test ./internal/mcp/...
+          constraints:
+            - Load agent config to check output_mode field
+            - If output_mode is hooks then read artifact file and return parsed output
+            - If artifact file missing or empty return appropriate message
+            - If output_mode is tags or terminal use existing tmux capture logic
+            - Preserve all existing parameters like lines pattern since_last clean
+      - id: task-109
+        title: "Agent hooks: auto-inject hook config for Claude Code on spawn"
+        description: "When spawning Claude Code with output_mode: hooks, automatically inject TERMTILE_WORKSPACE and TERMTILE_SLOT env vars, generate a Stop hook config, and pass via --settings flag. The hook should call `termtile hook emit` with the workspace/slot from env vars."
+        priority: high
+        tags:
+          - hooks
+          - mcp
+          - claude-code
+          - spawn
+        relatedFiles:
+          - internal/mcp/tools.go
+          - internal/mcp/hooks.go
+        contract:
+          status: ready
+          deliverables:
+            - type: file
+              path: internal/mcp/hooks.go
+              description: Generate Claude Code hook settings JSON for Stop event
+            - type: file
+              path: internal/mcp/tools.go
+              description: Inject TERMTILE env vars and --settings flag when output_mode is hooks
+          validation:
+            commands:
+              - go build ./...
+              - go vet ./...
+          constraints:
+            - Only inject for agents where output_mode is hooks
+            - Use --settings with inline JSON or temp file
+            - Hook must call termtile hook emit with workspace and slot from env
+            - Clean up temp settings file if created
+      - id: task-113
+        title: Remove in-memory ArtifactStore, use disk-only artifacts
+        description: "Remove the in-memory ArtifactStore from server.go and artifacts.go. get_artifact should read output.json directly from disk (GetArtifactDir + output.json). All agents now write to the same file path — hook agents via termtile hook emit, hookless agents write directly. Remove ArtifactStore struct, NewArtifactStore, Set/Get/Clear methods. Keep the disk-based helpers: GetArtifactDir, EnsureArtifactDir, ReadArtifact, CleanupArtifact, CleanStaleOutput, artifactFilePath, artifactBaseDir. Update get_artifact tool handler to read from disk. Remove ArtifactStore from Server struct and initialization."
+        priority: high
+        tags:
+          - mcp
+          - refactor
+        relatedFiles:
+          - internal/mcp/artifacts.go
+          - internal/mcp/artifacts_test.go
+          - internal/mcp/server.go
+          - internal/mcp/tools.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/artifacts.go
+              description: Remove ArtifactStore in-memory code, keep disk helpers
+            - type: file
+              path: internal/mcp/server.go
+              description: Remove ArtifactStore from Server struct
+            - type: file
+              path: internal/mcp/tools.go
+              description: Update get_artifact handler to read from disk
+          validation:
+            commands:
+              - go vet ./...
+              - go test ./...
+          constraints:
+            - Keep all disk-based artifact helpers (GetArtifactDir, EnsureArtifactDir, ReadArtifact, etc)
+            - Keep substituteSlotOutputTemplates but have it read from disk via ReadArtifact instead of store.Get
+            - Update or remove artifacts_test.go to match
+            - Run go vet ./... and go test ./... before delivering
+        subtasks:
+          - id: task-113-1
+            title: Remove ArtifactStore types and template substitution in artifacts.go
+            completed: true
+          - id: task-113-2
+            title: Remove server-side in-memory artifact hooks and storage calls
+            completed: true
+          - id: task-113-3
+            title: Switch get_artifact and slot transfer logic to disk artifacts
+            completed: true
+          - id: task-113-4
+            title: Update artifacts tests and run vet/test validations
+            completed: true
+      - id: task-111
+        title: Simplify wait_for_idle to poll for output.json
+        description: Replace tmux idle pattern matching in wait_for_idle with file polling for output.json in the artifact dir. The file appearing signals completion. Keep timeout parameter. Remove idle_pattern logic from this tool handler. The tool should poll the artifact file path (GetArtifactDir + output.json) on an interval (e.g. 2s) until it exists or timeout.
+        priority: high
+        tags:
+          - mcp
+          - refactor
+        relatedFiles:
+          - internal/mcp/tools.go
+          - internal/mcp/artifacts.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/tools.go
+              description: Rewrite wait_for_idle tool handler to poll for output.json file
+          validation:
+            commands:
+              - go vet ./...
+              - go test ./...
+          constraints:
+            - Do not remove idle_pattern from config - it may still be useful for other purposes
+            - "Keep the timeout parameter and return is_idle: false on timeout"
+            - Return the parsed output.json content in the output field on success
+            - Run go vet ./... and go test ./... before delivering
+      - id: task-112
+        title: Simplify read_from_agent to raw tmux tail
+        description: Strip read_from_agent down to a raw tmux capture-pane tail (50-100 lines, configurable via lines param). Remove artifact reading, fence parsing, and any structured output extraction. This tool becomes pure live monitoring — what's on screen right now. Remove the response_fence / fence-related parsing logic from the tool handler. Keep the clean parameter for stripping TUI chrome.
+        priority: high
+        tags:
+          - mcp
+          - refactor
+        relatedFiles:
+          - internal/mcp/tools.go
+        contract:
+          status: done
+          deliverables:
+            - type: file
+              path: internal/mcp/tools.go
+              description: Rewrite read_from_agent to simple tmux capture-pane tail
+          validation:
+            commands:
+              - go vet ./...
+              - go test ./...
+          constraints:
+            - Keep lines parameter (default 50, max 100)
+            - Keep clean parameter for TUI chrome stripping
+            - Remove fence parsing and artifact reading from this handler
+            - Do not touch spawn or other tool handlers
+            - Run go vet ./... and go test ./... before delivering
+      - id: task-114
+        title: "Docs rebuild pass 1: rewrite docs to match current hook-based architecture"
+        description: |-
+          First pass by codex. Read all source files to understand the current code reality, then rewrite docs/ to accurately reflect it.
+
+          KEY CHANGES TO DOCUMENT:
+          1. **Hook system is the primary output mechanism** — output_mode: hooks is the default. Agents get hooks injected at spawn (BeforeAgent for task context, AfterAgent for output capture). All agents write output.json to a disk artifact directory.
+          2. **Three hook delivery types**: cli_flag (Claude — hooks JSON passed via --hooks flag), project_file (Gemini — hooks written to .gemini/settings.json), none (codex/cursor-agent — no native hooks, file-write instructions appended to task instead)
+          3. **Artifact system is disk-based** — no more in-memory ArtifactStore. Artifacts live at ~/.local/share/termtile/artifacts/{workspace}/{slot}/output.json
+          4. **wait_for_idle polls output.json** — no more tiered fence/pattern/process detection for wait_for_idle. It simply polls for output.json file appearance with status: complete.
+          5. **read_from_agent is pure tmux tail** — bounded capture-pane tail for live monitoring only. No artifact reading, no fence parsing.
+          6. **checkIdle still uses the old tiers** for list_agents is_idle field and depends_on polling (fence → pattern → process). Document this distinction.
+          7. **New agent config fields**: output_mode, hook_delivery, hook_entry, hook_wrapper, hook_events, hook_settings_flag, hook_settings_dir, hook_settings_file, hook_output, hook_response_field, prompt_as_arg, prompt_flag, pipe_task, default_model, model_flag, models, ready_pattern, env, description
+          8. **move_terminal tool** — moves terminals between workspaces (X11 window move + tmux session rename + registry update)
+          9. **agent_meta.json** written at spawn so hook CLI can look up agent-specific config
+          10. **fileWriteInstructions** — hookless agents get instructions appended to write output.json manually
+
+          SOURCE FILES TO READ:
+          - internal/mcp/tools.go (handleSpawnAgent, handleWaitForIdle, handleReadFromAgent, handleGetArtifact, handleKillAgent, handleMoveTerminal, checkIdle, fileWriteInstructions)
+          - internal/mcp/hooks.go (resolveHooks, renderHookSettings, fileWriteInstructions)
+          - internal/mcp/hook_files.go (injectProjectFileHooks, restoreProjectFileHooks, writeAgentMeta)
+          - internal/mcp/artifacts.go (disk artifact helpers)
+          - internal/mcp/server.go (Server struct, NewServer, registerTools)
+          - internal/mcp/spawn.go (spawnAgentWithDependencies)
+          - internal/mcp/types.go (all input/output types)
+          - internal/config/config.go (AgentConfig struct with all fields)
+          - cmd/termtile/hook.go (hook CLI subcommands)
+          - cmd/termtile/main.go (CLI router)
+
+          DOCS TO UPDATE:
+          - docs/agent-orchestration.md — MAJOR rewrite needed. Replace fence-centric content with hook-based architecture.
+          - docs/configuration.md — Add all new agent config fields, document hook schema, update agent example configs.
+          - docs/cli.md — Add hook subcommands (termtile hook start/check/emit), mcp cleanup.
+
+          STYLE: Keep docs concise, use tables for config fields, include realistic YAML examples showing claude + gemini + codex configs.
+        priority: high
+        tags:
+          - docs
+          - hooks
+          - mcp
+          - rewrite
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: docs/agent-orchestration.md
+              description: Rewritten to document hook-based architecture, output.json pipeline, all tools including move_terminal
+            - type: file
+              path: docs/configuration.md
+              description: Updated with all new agent config fields and hook schema
+            - type: file
+              path: docs/cli.md
+              description: Updated with hook subcommands
+          validation:
+            commands:
+              - grep -q 'output.json' docs/agent-orchestration.md
+              - grep -q 'hook_delivery' docs/configuration.md
+              - grep -q 'hook' docs/cli.md
+          constraints:
+            - Read source files before writing — do not guess at behavior
+            - Keep existing doc structure where still accurate, rewrite sections that are wrong
+            - Do not remove docs for features that still exist (fence detection still used by checkIdle for list_agents)
+            - Use realistic config examples matching actual ~/.config/termtile/config.yaml
+        subtasks:
+          - id: task-114-1
+            title: Read all listed MCP/config/CLI source files and capture behavior deltas for docs
+            completed: true
+          - id: task-114-2
+            title: Rewrite docs/agent-orchestration.md for hook-first architecture and tool behavior
+            completed: true
+          - id: task-114-3
+            title: Rewrite docs/configuration.md with full agent config + hook schema and examples
+            completed: true
+          - id: task-114-4
+            title: Rewrite docs/cli.md with hook subcommands and current MCP CLI notes
+            completed: true
+          - id: task-114-5
+            title: Run validation commands and write completion JSON artifact output
+            completed: true
+      - id: task-116
+        title: Build VitePress docs site with landing page
+        description: |-
+          Set up a VitePress documentation site for termtile. The existing docs/*.md files become the content pages. Add a polished landing page with hero section and feature grid.
+
+          SETUP:
+          - Initialize VitePress in the docs/ directory (docs/.vitepress/)
+          - package.json at project root with scripts: docs:dev, docs:build, docs:preview
+          - Use default VitePress theme (no custom Vue components needed)
+          - Configure for GitHub Pages deployment (base: '/termtile/')
+
+          LANDING PAGE (docs/index.md):
+          - Hero section: name "termtile", tagline "AI agent orchestration meets tiling window management", description of what it does
+          - Hero image: reference /demo.gif (we'll add the actual file later, use a placeholder path)
+          - Two action buttons: "Get Started" → /getting-started, "View on GitHub" → https://github.com/1broseidon/termtile
+          - Features grid (3-4 cards):
+            1. MCP Agent Orchestration — Spawn, monitor, and coordinate AI agents across terminal windows via Model Context Protocol
+            2. Hook-Based Output Capture — Unified output.json pipeline works across Claude, Gemini, Codex and any future agent
+            3. Tiling Window Manager — Automatic tiling layouts for terminal windows with hotkeys, workspaces, and live retiling
+            4. Pipeline Dependencies — Chain agents with depends_on, pass artifacts between stages with template substitution
+
+          SIDEBAR NAVIGATION:
+          - Getting Started
+          - Configuration
+          - Layouts
+          - Workspaces
+          - AI Agent Orchestration
+          - CLI Reference
+          - TUI
+          - Daemon
+
+          VITEPRESS CONFIG (docs/.vitepress/config.ts):
+          - title: termtile
+          - description: Tiling window manager with AI agent orchestration
+          - themeConfig: nav bar with GitHub link, sidebar matching above structure
+          - Dark mode default
+          - head: favicon (can be placeholder)
+
+          FILES TO CREATE:
+          - docs/.vitepress/config.ts
+          - docs/index.md (landing page with hero + features)
+          - package.json (at project root, vitepress as devDependency)
+          - .gitignore addition: docs/.vitepress/cache, docs/.vitepress/dist
+
+          DO NOT modify existing docs/*.md content files — those are being rewritten by another agent concurrently.
+        priority: high
+        tags:
+          - docs
+          - vitepress
+          - landing-page
+          - site
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: docs/.vitepress/config.ts
+              description: VitePress config with nav, sidebar, theme
+            - type: file
+              path: docs/index.md
+              description: Landing page with hero and features grid
+            - type: file
+              path: package.json
+              description: Project root package.json with vitepress devDep and scripts
+          validation:
+            commands:
+              - test -f docs/.vitepress/config.ts
+              - test -f docs/index.md
+              - test -f package.json
+          constraints:
+            - Do NOT modify any existing docs/*.md files
+            - Use default VitePress theme only, no custom Vue components
+            - Keep config minimal and clean
+      - id: task-115
+        title: "Docs rebuild pass 2: technical accuracy review by Claude agent"
+        description: |-
+          Second pass. Read every doc file that pass 1 updated, then cross-reference against actual source code to verify:
+          - Every config field documented actually exists in config.go AgentConfig struct
+          - Every CLI command documented matches cmd/termtile/main.go router
+          - Every MCP tool description matches the actual handler behavior in tools.go
+          - Code examples compile/parse correctly (YAML syntax, JSON syntax)
+          - No stale references to removed features (ArtifactStore, in-memory artifacts, fence-only idle detection for wait_for_idle)
+          - Flow descriptions match actual code paths (e.g. spawn → hook injection → task send sequence)
+
+          Fix any inaccuracies found. Add missing details where source code reveals behavior not documented.
+        priority: high
+        tags:
+          - docs
+          - review
+          - accuracy
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: docs/agent-orchestration.md
+              description: Technically verified against source code
+            - type: file
+              path: docs/configuration.md
+              description: All config fields verified against config.go
+            - type: file
+              path: docs/cli.md
+              description: All commands verified against main.go
+          validation:
+            commands:
+              - go vet ./...
+          constraints:
+            - Cross-reference every claim against source code
+            - Do not invent features that don't exist in the code
+            - Preserve pass 1 structure, only fix inaccuracies and add missing details
+      - id: task-117
+        title: Align termtile docs site structure and styling with otto docs pattern
+        description: |-
+          Make the termtile VitePress docs site follow the same structural pattern as ~/Projects/core/otto/docs while keeping termtile's own identity.
+
+          STRUCTURAL CHANGES:
+          1. Move package.json INTO docs/ directory (like otto). Delete the root package.json. Scripts become `npm run dev`, `npm run build`, `npm run preview` (no docs: prefix)
+          2. Rename config.ts → config.mts (match otto)
+          3. Add custom theme: docs/.vitepress/theme/index.ts importing custom.css (same pattern as otto)
+          4. Add srcExclude for any non-doc directories if needed
+
+          STYLING (custom.css):
+          - Create a termtile-specific color theme — NOT teal like otto. Use a cool blue/indigo palette that evokes terminals/code:
+            - Brand primary: indigo/electric blue (#6366f1 / #818cf8 range)
+            - Dark mode variants
+            - Hero name gradient (indigo → slate)
+            - Hero image glow effect (like otto has)
+            - Button hover states
+            - Clean minimal hero text styling
+
+          CONFIG (config.mts):
+          - Add logo to themeConfig (use placeholder path /termtile-logo.png for now)
+          - Add footer: message "Tiling window manager with AI agent orchestration"
+          - Add nav items: Guide, Config, Agents, GitHub
+          - Keep existing sidebar structure
+          - Add head entries for favicon (placeholder paths like otto)
+          - Remove the base: '/termtile/' for now (can add back for GH Pages deploy later)
+
+          LANDING PAGE (index.md):
+          - Add a "Quick Start" section below the features (like otto has) with install instructions:
+            go install github.com/1broseidon/termtile/cmd/termtile@latest
+          - Keep existing hero and features, just ensure style matches otto's clean look
+
+          REFERENCE: ~/Projects/core/otto/docs/ for exact file structure and patterns. Match the structure, NOT the content/branding.
+
+          DO NOT modify any existing docs content files (agent-orchestration.md, configuration.md, etc) — only VitePress scaffolding files.
+        priority: high
+        tags:
+          - docs
+          - vitepress
+          - styling
+          - site
+        contract:
+          status: delivered
+          deliverables:
+            - type: file
+              path: docs/package.json
+              description: Moved into docs/ with simple scripts
+            - type: file
+              path: docs/.vitepress/config.mts
+              description: Renamed with logo, footer, nav, favicon heads
+            - type: file
+              path: docs/.vitepress/theme/index.ts
+              description: Custom theme loader
+            - type: file
+              path: docs/.vitepress/theme/custom.css
+              description: Indigo/blue brand colors with hero glow
+            - type: file
+              path: docs/index.md
+              description: Updated with quick start section
+          validation:
+            commands:
+              - test -f docs/package.json
+              - test -f docs/.vitepress/config.mts
+              - test -f docs/.vitepress/theme/custom.css
+              - test ! -f package.json
+          constraints:
+            - Follow ~/Projects/core/otto/docs/ structure exactly
+            - Do NOT use teal/green colors — use indigo/blue for termtile identity
+            - Do NOT modify existing docs content files
+            - Delete root package.json after creating docs/package.json
   - id: backlog
     title: Backlog
     tasks:
@@ -780,4 +1287,12 @@ columns:
           - id: task-89-3
             title: Write README section for termtile tui usage + keybinds
             completed: false
+      - id: task-110
+        title: Research hook support for codex, gemini, and cecli agents
+        description: "Investigate native hook/lifecycle event support in codex CLI, gemini CLI, and cecli (aider-ce, docs at cecli.dev). Map each agent's native events to termtile's 3 abstract hook points (on_start, on_check, on_end). Document: what events exist, what stdin/stdout format they use, how to inject settings, and what the fallback strategy is for unsupported hooks."
+        priority: medium
+        tags:
+          - hooks
+          - research
+          - agents
 ---

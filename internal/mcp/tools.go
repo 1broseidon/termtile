@@ -102,36 +102,27 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 			}
 			return nil, SpawnAgentOutput{}, err
 		}
+	}
 
-		// Ensure artifacts exist for dependency slots (best-effort capture after idle).
-		seen := make(map[int]struct{}, len(args.DependsOn))
-		for _, dep := range args.DependsOn {
-			if _, ok := seen[dep]; ok {
-				continue
-			}
-			seen[dep] = struct{}{}
-			if s.artifacts != nil {
-				if _, ok := s.artifacts.Get(workspaceName, dep); ok {
-					continue
-				}
-			}
-			if err := s.captureAndStoreArtifactForSlot(workspaceName, dep); err != nil {
-				return nil, SpawnAgentOutput{}, fmt.Errorf("failed to capture artifact for dependency slot %d: %w", dep, err)
-			}
-		}
+	// Determine output mode early — it affects whether we wrap with fence tags.
+	outputMode := strings.ToLower(strings.TrimSpace(agentCfg.OutputMode))
+	if outputMode == "" {
+		outputMode = "hooks"
 	}
 
 	// Determine the task text to send to the agent.
-	// When response_fence is enabled, prepend structured output instructions.
+	// When response_fence is enabled (and hooks are NOT active), prepend
+	// structured output instructions. Hooks capture output via the
+	// transcript, so fence tags are unnecessary noise.
 	taskTemplate := args.Task
 	if taskTemplate != "" && len(args.DependsOn) > 0 {
-		expanded, missing := substituteSlotOutputTemplates(taskTemplate, workspaceName, args.DependsOn, s.artifacts)
+		expanded, missing := substituteSlotOutputTemplates(taskTemplate, workspaceName, args.DependsOn)
 		taskTemplate = expanded
 		if len(missing) > 0 {
 			log.Printf("Warning: missing artifacts for workspace %q dependency slots %v", workspaceName, missing)
 		}
 	}
-	responseFence := agentCfg.ResponseFence && taskTemplate != ""
+	responseFence := agentCfg.ResponseFence && taskTemplate != "" && outputMode != "hooks"
 	taskToSend := taskTemplate
 	if taskTemplate != "" && responseFence {
 		taskToSend = wrapTaskWithFence(taskTemplate)
@@ -158,14 +149,73 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		cmdParts = append(cmdParts, modelFlag, shellQuote(selectedModel))
 	}
 
+	// Inject native hook settings when output_mode is hooks.
+	needsFileWriteInstructions := false
+	var preSpawnProjectFileHook func(ws string, sl int) error
+	if outputMode == "hooks" {
+		hooks := resolveHooks(agentCfg)
+		settings := renderHookSettings(agentCfg, hooks)
+		delivery := strings.ToLower(strings.TrimSpace(agentCfg.HookDelivery))
+
+		switch {
+		case settings != "" && delivery == "cli_flag":
+			flag := strings.TrimSpace(agentCfg.HookSettingsFlag)
+			if flag != "" {
+				cmdParts = append(cmdParts, flag, shellQuote(settings))
+			}
+		case settings != "" && delivery == "project_file":
+			capturedSettings, capturedCfg := settings, agentCfg
+			effectiveCwd := strings.TrimSpace(args.Cwd)
+			if effectiveCwd == "" {
+				effectiveCwd = resolveProjectRoot()
+			}
+			if effectiveCwd == "" {
+				if savedWs, err := workspacepkg.Read(workspaceName); err == nil && len(savedWs.Terminals) > 0 {
+					effectiveCwd = strings.TrimSpace(savedWs.Terminals[0].Cwd)
+				}
+			}
+			if effectiveCwd == "" {
+				effectiveCwd = s.workspaceCwd(workspaceName)
+			}
+			// Write the real task to context.md so the on_start hook
+			// injects it as context. Replace the CLI prompt with a
+			// generic trigger so the agent starts working.
+			capturedTask := taskToSend
+			preSpawnProjectFileHook = func(ws string, sl int) error {
+				if _, err := injectProjectFileHooks(ws, sl, effectiveCwd, capturedCfg, capturedSettings); err != nil {
+					return err
+				}
+				if capturedTask != "" {
+					return writeTaskContext(ws, sl, capturedTask)
+				}
+				return nil
+			}
+			if taskToSend != "" {
+				taskToSend = "start"
+			}
+		default:
+			if taskTemplate != "" {
+				// Agent has no native hooks — we'll send file-write instructions
+				// after spawn when the slot number is known.
+				needsFileWriteInstructions = true
+			}
+		}
+	}
+
 	// When PromptAsArg is true and a task is provided, append the task
 	// as a CLI argument instead of sending it via tmux send-keys later.
+	// When PromptFlag is set (e.g. "-i" for gemini), use it as the flag
+	// name instead of appending as a bare positional arg.
 	promptInCmd := agentCfg.PromptAsArg && taskTemplate != ""
 	if promptInCmd && len(taskToSend) > 32*1024 {
 		promptInCmd = false
 	}
 	if promptInCmd {
-		cmdParts = append(cmdParts, shellQuote(taskToSend))
+		if pf := strings.TrimSpace(agentCfg.PromptFlag); pf != "" {
+			cmdParts = append(cmdParts, pf, shellQuote(taskToSend))
+		} else {
+			cmdParts = append(cmdParts, shellQuote(taskToSend))
+		}
 	}
 
 	// When PipeTask is true and a task is provided, pipe the task via
@@ -192,6 +242,7 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		agentCfg,
 		nil,
 		0,
+		preSpawnProjectFileHook,
 	)
 	if err != nil {
 		if s.logger != nil {
@@ -211,10 +262,37 @@ func (s *Server) handleSpawnAgent(_ context.Context, _ *mcpsdk.CallToolRequest, 
 		return nil, SpawnAgentOutput{}, err
 	}
 
+	// Write agent metadata to artifact dir so the hook CLI can look up config.
+	if err := writeAgentMeta(workspaceName, slot, args.AgentType); err != nil {
+		log.Printf("Warning: failed to write agent meta for slot %d: %v", slot, err)
+	}
+
 	// If a task is provided and wasn't passed as a CLI argument or piped,
 	// wait until the agent is ready then send via tmux send-keys.
 	if taskTemplate != "" && !promptInCmd && !pipeInCmd {
+		// For non-hook agents in hooks mode, append file-write instructions
+		// now that we know the slot number.
+		if needsFileWriteInstructions {
+			if instr := fileWriteInstructions(workspaceName, slot); instr != "" {
+				taskToSend += instr
+			}
+			needsFileWriteInstructions = false
+		}
 		s.waitAndSendTask(tmuxTarget, args.AgentType, taskToSend, agentCfg)
+	}
+
+	// For prompt_as_arg or piped agents without native hooks, send the
+	// file-write instructions as a follow-up message after the task.
+	if needsFileWriteInstructions {
+		if instr := fileWriteInstructions(workspaceName, slot); instr != "" {
+			go func() {
+				// Brief delay for the agent to start processing the initial task.
+				time.Sleep(3 * time.Second)
+				if err := tmuxSendKeys(tmuxTarget, instr); err != nil {
+					log.Printf("Warning: failed to send file-write instructions to slot %d: %v", slot, err)
+				}
+			}()
+		}
 	}
 
 	// Activate pipe-pane for fence-enabled agents to capture the raw byte
@@ -383,6 +461,9 @@ func (s *Server) spawnWindow(workspace, agentType, cwd string, responseFence boo
 		}
 	}()
 
+	if cwd == "" {
+		cwd = resolveProjectRoot()
+	}
 	if cwd == "" {
 		cwd = savedCwd
 	}
@@ -677,19 +758,18 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 
 	linesRequested := args.Lines
 	lines := normalizeReadLines(args.Lines)
-	captureLines := lines
-	if fence, _ := s.getFenceState(workspaceName, args.Slot); fence && captureLines < fenceReadCaptureLines {
-		captureLines = fenceReadCaptureLines
-	}
-	fence, _ := s.getFenceState(workspaceName, args.Slot)
 
-	postProcess := func(raw string) string {
+	preProcess := func(raw string) string {
 		output := raw
 		if args.Clean {
 			output = cleanOutput(output)
 		}
-		output = trimOutput(output, fence)
 		output = tailOutputLines(output, lines)
+		return output
+	}
+
+	postProcess := func(raw string) string {
+		output := preProcess(raw)
 		if args.SinceLast {
 			prev := s.getReadSnapshot(workspaceName, args.Slot)
 			s.setReadSnapshot(workspaceName, args.Slot, output)
@@ -706,12 +786,12 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 			timeout = 30 * time.Second
 		}
 
-		output, err := tmuxWaitFor(target, args.Pattern, timeout, captureLines)
-		output = postProcess(output)
+		raw, waitErr := tmuxWaitFor(target, args.Pattern, timeout, lines)
+		output := postProcess(raw)
+		found := waitErr == nil
 
-		if err != nil {
+		if !found {
 			// Timeout: return found=false with whatever output we captured.
-			found := false
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,
@@ -734,7 +814,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 			}, nil
 		}
 
-		found := true
+		found = true
 		if s.logger != nil {
 			details := map[string]interface{}{
 				"agent_type":      agentType,
@@ -758,8 +838,8 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 	}
 
 	// One-shot read (no pattern): return a bounded tail preview window.
-	output, err := tmuxCapturePane(target, captureLines)
-	if err != nil {
+	output, captureErr := tmuxCapturePane(target, lines)
+	if captureErr != nil {
 		if s.logger != nil {
 			s.logger.Log(agent.ActionRead, workspaceName, args.Slot, map[string]interface{}{
 				"agent_type":      agentType,
@@ -771,7 +851,7 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 				"error":           "capture_failed",
 			})
 		}
-		return nil, ReadFromAgentOutput{}, fmt.Errorf("failed to read from slot %d (target %s): %w", args.Slot, target, err)
+		return nil, ReadFromAgentOutput{}, fmt.Errorf("failed to read from slot %d (target %s): %w", args.Slot, target, captureErr)
 	}
 
 	output = postProcess(output)
@@ -792,6 +872,36 @@ func (s *Server) handleReadFromAgent(_ context.Context, _ *mcpsdk.CallToolReques
 		Output:      output,
 		SessionName: target,
 	}, nil
+}
+
+func readHookArtifactOutput(workspace string, slot int) (output string, ready bool, err error) {
+	data, err := ReadArtifact(workspace, slot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("hook artifact not found for workspace %q slot %d", workspace, slot), false, nil
+		}
+		return "", false, err
+	}
+
+	if strings.TrimSpace(string(data)) == "" {
+		return fmt.Sprintf("hook artifact is empty for workspace %q slot %d", workspace, slot), false, nil
+	}
+
+	payload, err := parseHookArtifactPayload(data)
+	if err != nil {
+		return fmt.Sprintf("hook artifact is invalid JSON for workspace %q slot %d", workspace, slot), false, nil
+	}
+
+	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	if status != "" && status != "complete" {
+		return fmt.Sprintf("hook artifact status %q for workspace %q slot %d", payload.Status, workspace, slot), false, nil
+	}
+
+	if strings.TrimSpace(payload.Output) == "" {
+		return fmt.Sprintf("hook artifact output is empty for workspace %q slot %d", workspace, slot), false, nil
+	}
+
+	return payload.Output, true, nil
 }
 
 func (s *Server) handleListAgents(_ context.Context, _ *mcpsdk.CallToolRequest, args ListAgentsInput) (*mcpsdk.CallToolResult, ListAgentsOutput, error) {
@@ -890,6 +1000,11 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 	mode := s.getSpawnMode(workspaceName, args.Slot)
 	agentType := s.getAgentType(workspaceName, args.Slot)
 
+	// Restore project file hooks before killing the session.
+	if err := restoreProjectFileHooks(workspaceName, args.Slot); err != nil {
+		log.Printf("Warning: failed to restore project file hooks for workspace %q slot %d: %v", workspaceName, args.Slot, err)
+	}
+
 	// Stop pipe-pane and remove the pipe file before killing the session.
 	pipePath, _ := s.getPipeState(workspaceName, args.Slot)
 	if pipePath != "" {
@@ -913,6 +1028,9 @@ func (s *Server) handleKillAgent(_ context.Context, _ *mcpsdk.CallToolRequest, a
 
 	// Always remove tracking — the target may already be gone (killed externally).
 	s.removeTracked(workspaceName, args.Slot)
+	if err := CleanupArtifact(workspaceName, args.Slot); err != nil {
+		log.Printf("Warning: failed to clean artifact directory for workspace %q slot %d: %v", workspaceName, args.Slot, err)
+	}
 
 	if mode == "window" {
 		if wsInfo, err := workspacepkg.GetWorkspaceByName(workspaceName); err == nil {
@@ -957,24 +1075,37 @@ func (s *Server) handleGetArtifact(_ context.Context, _ *mcpsdk.CallToolRequest,
 	if err != nil {
 		return nil, GetArtifactOutput{}, err
 	}
-	if s == nil || s.artifacts == nil {
-		return nil, GetArtifactOutput{}, fmt.Errorf("artifact store not initialized")
+
+	data, err := ReadArtifact(workspaceName, args.Slot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, GetArtifactOutput{}, fmt.Errorf("no artifact for workspace %q slot %d", workspaceName, args.Slot)
+		}
+		return nil, GetArtifactOutput{}, fmt.Errorf("failed to read artifact for workspace %q slot %d: %w", workspaceName, args.Slot, err)
 	}
-	art, ok := s.artifacts.Get(workspaceName, args.Slot)
-	if !ok {
-		return nil, GetArtifactOutput{}, fmt.Errorf("no artifact for workspace %q slot %d", workspaceName, args.Slot)
+
+	payload, err := parseHookArtifactPayload(data)
+	if err != nil {
+		return nil, GetArtifactOutput{}, fmt.Errorf("invalid artifact payload for workspace %q slot %d: %w", workspaceName, args.Slot, err)
 	}
-	// Ensure returned workspace is normalized to the request workspace.
-	art.Workspace = workspaceName
+
+	lastUpdated := time.Time{}
+	if path, pathErr := artifactFilePath(workspaceName, args.Slot); pathErr == nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			lastUpdated = info.ModTime().UTC()
+		}
+	}
+
+	output := payload.Output
 	return nil, GetArtifactOutput{
-		Workspace:      art.Workspace,
-		Slot:           art.Slot,
-		Output:         art.Output,
-		Truncated:      art.Truncated,
-		Warning:        art.Warning,
-		OriginalBytes:  art.OriginalBytes,
-		StoredBytes:    art.StoredBytes,
-		LastUpdatedUTC: art.LastUpdatedUTC,
+		Workspace:      workspaceName,
+		Slot:           args.Slot,
+		Output:         output,
+		Truncated:      false,
+		Warning:        "",
+		OriginalBytes:  len(output),
+		StoredBytes:    len(output),
+		LastUpdatedUTC: lastUpdated,
 	}, nil
 }
 
@@ -1008,82 +1139,53 @@ func (s *Server) handleWaitForIdle(_ context.Context, _ *mcpsdk.CallToolRequest,
 	}
 
 	agentType := s.getAgentType(workspaceName, args.Slot)
-	fence, _ := s.getFenceState(workspaceName, args.Slot)
-	deadline := time.Now().Add(timeout)
+	const waitOutputMode = "hooks"
+
 	start := time.Now()
+	deadline := time.Now().Add(timeout)
 
 	for {
-		if s.checkIdle(target, agentType, workspaceName, args.Slot) {
-			// When fence is active, capture full scrollback so we can
-			// find both the opening and closing tags for extraction,
-			// even for long responses where the opening tag scrolled
-			// past the default capture window.
-			captureLines := lines
-			if fence {
-				captureLines = 0 // full scrollback
-			}
-			output, err := tmuxCapturePane(target, captureLines)
-			if err != nil {
-				if s.logger != nil {
-					s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, map[string]interface{}{
-						"agent_type":      agentType,
-						"is_idle":         false,
-						"lines":           lines,
-						"timeout_seconds": int(timeout / time.Second),
-						"elapsed_ms":      time.Since(start).Milliseconds(),
-						"error":           "capture_failed",
-					})
-				}
-				return nil, WaitForIdleOutput{}, fmt.Errorf("failed to capture output from slot %d (target %s): %w", args.Slot, target, err)
-			}
-			cleanedOutput := trimOutput(cleanOutput(output), fence)
-			if s.artifacts != nil {
-				s.artifacts.Set(workspaceName, args.Slot, cleanedOutput)
-			}
+		raw, ready, readErr := readHookArtifactOutput(workspaceName, args.Slot)
+		if readErr == nil && ready {
 			if s.logger != nil {
 				details := map[string]interface{}{
 					"agent_type":      agentType,
+					"output_mode":     waitOutputMode,
 					"is_idle":         true,
 					"lines":           lines,
 					"timeout_seconds": int(timeout / time.Second),
 					"elapsed_ms":      time.Since(start).Milliseconds(),
 				}
-				s.addOutputDetails(details, cleanedOutput)
+				s.addOutputDetails(details, raw)
 				s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, details)
 			}
 			return nil, WaitForIdleOutput{
 				IsIdle:      true,
-				Output:      cleanedOutput,
+				Output:      raw,
 				SessionName: target,
 			}, nil
 		}
 
 		if time.Now().After(deadline) {
-			// Timeout: return whatever output is available.
-			output, _ := tmuxCapturePane(target, lines)
-			cleanedOutput := trimOutput(cleanOutput(output), fence)
-			if s.artifacts != nil {
-				s.artifacts.Set(workspaceName, args.Slot, cleanedOutput)
-			}
 			if s.logger != nil {
-				details := map[string]interface{}{
+				s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, map[string]interface{}{
 					"agent_type":      agentType,
+					"output_mode":     waitOutputMode,
 					"is_idle":         false,
 					"lines":           lines,
 					"timeout_seconds": int(timeout / time.Second),
 					"elapsed_ms":      time.Since(start).Milliseconds(),
-				}
-				s.addOutputDetails(details, cleanedOutput)
-				s.logger.Log(agent.ActionWaitIdle, workspaceName, args.Slot, details)
+					"error":           "hook_artifact_timeout",
+				})
 			}
 			return nil, WaitForIdleOutput{
 				IsIdle:      false,
-				Output:      cleanedOutput,
+				Output:      "",
 				SessionName: target,
 			}, nil
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -1139,6 +1241,17 @@ func (s *Server) handleMoveTerminal(_ context.Context, _ *mcpsdk.CallToolRequest
 		return nil, MoveTerminalOutput{}, fmt.Errorf("failed to update workspace registry: %w", err)
 	}
 
+	if err := moveArtifactDir(srcWorkspace, args.Slot, dstWorkspace, newSlot); err != nil {
+		log.Printf(
+			"Warning: failed to move artifact directory for %q slot %d -> %q slot %d: %v",
+			srcWorkspace,
+			args.Slot,
+			dstWorkspace,
+			newSlot,
+			err,
+		)
+	}
+
 	// Rename tmux session from old workspace naming to new.
 	newSessionName := agent.SessionName(dstWorkspace, newSlot)
 	newTarget := agent.TargetForSession(newSessionName)
@@ -1170,13 +1283,6 @@ func (s *Server) handleMoveTerminal(_ context.Context, _ *mcpsdk.CallToolRequest
 	s.tracked[dstWorkspace][newSlot] = ta
 	s.mu.Unlock()
 
-	// Transfer artifact if present.
-	if s.artifacts != nil {
-		if art, ok := s.artifacts.Get(srcWorkspace, args.Slot); ok {
-			s.artifacts.Set(dstWorkspace, newSlot, art.Output)
-			s.artifacts.Clear(srcWorkspace, args.Slot)
-		}
-	}
 	// Transfer read snapshot if present.
 	if snap := s.getReadSnapshot(srcWorkspace, args.Slot); snap != "" {
 		s.setReadSnapshot(dstWorkspace, newSlot, snap)
@@ -1279,9 +1385,14 @@ func (s *Server) compactWindowSlots(workspace string, removedSlot int) error {
 	for _, mv := range artifactMoves {
 		fromSlot := mv[0]
 		toSlot := mv[1]
-		if art, ok := s.artifacts.Get(workspace, fromSlot); ok {
-			s.artifacts.Set(workspace, toSlot, art.Output)
-			s.artifacts.Clear(workspace, fromSlot)
+		if err := moveArtifactDir(workspace, fromSlot, workspace, toSlot); err != nil {
+			log.Printf(
+				"Warning: failed to move artifact directory for workspace %q slot %d -> %d: %v",
+				workspace,
+				fromSlot,
+				toSlot,
+				err,
+			)
 		}
 	}
 
@@ -1449,15 +1560,30 @@ func listRegisteredAgentWorkspaces() ([]string, error) {
 }
 
 func resolveWorkspaceFromProjectMarker() (workspace string, sourcePath string, err error) {
+	workspace, _, sourcePath, err = findProjectBinding()
+	return workspace, sourcePath, err
+}
+
+// resolveProjectRoot returns the project root directory by walking up from the
+// MCP server's working directory looking for .termtile/workspace.yaml.
+// Returns empty string if no project binding is found.
+func resolveProjectRoot() string {
+	_, root, _, _ := findProjectBinding()
+	return root
+}
+
+// findProjectBinding walks up from cwd looking for .termtile/workspace.yaml
+// and returns the workspace name, project root directory, and source path.
+func findProjectBinding() (workspace string, projectRoot string, sourcePath string, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to determine current working directory: %w", err)
+		return "", "", "", fmt.Errorf("failed to determine current working directory: %w", err)
 	}
 
 	for dir := cwd; ; dir = filepath.Dir(dir) {
 		binding, found, err := loadProjectWorkspaceBinding(dir)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		if found {
 			marker := strings.TrimSpace(binding.RootMarker)
@@ -1471,13 +1597,13 @@ func resolveWorkspaceFromProjectMarker() (workspace string, sourcePath string, e
 			}
 			if _, err := os.Stat(markerPath); err != nil {
 				if os.IsNotExist(err) {
-					return "", "", fmt.Errorf(
+					return "", "", "", fmt.Errorf(
 						"project workspace config %q references missing project.root_marker %q; pass workspace explicitly or fix project config",
 						binding.SourcePath,
 						marker,
 					)
 				}
-				return "", "", fmt.Errorf(
+				return "", "", "", fmt.Errorf(
 					"failed to stat project.root_marker %q from %q: %w",
 					marker,
 					binding.SourcePath,
@@ -1485,7 +1611,7 @@ func resolveWorkspaceFromProjectMarker() (workspace string, sourcePath string, e
 				)
 			}
 
-			return strings.TrimSpace(binding.Workspace), binding.SourcePath, nil
+			return strings.TrimSpace(binding.Workspace), dir, binding.SourcePath, nil
 		}
 
 		parent := filepath.Dir(dir)
@@ -1494,7 +1620,7 @@ func resolveWorkspaceFromProjectMarker() (workspace string, sourcePath string, e
 		}
 	}
 
-	return "", "", nil
+	return "", "", "", nil
 }
 
 func loadProjectWorkspaceBinding(dir string) (projectWorkspaceBinding, bool, error) {

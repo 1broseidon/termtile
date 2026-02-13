@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -222,7 +224,6 @@ func TestMoveTerminalTracking(t *testing.T) {
 	s := &Server{
 		config:      config.DefaultConfig(),
 		multiplexer: agent.NewTmuxMultiplexer(),
-		artifacts:   NewArtifactStore(DefaultArtifactCapBytes),
 		tracked:     make(map[string]map[int]trackedAgent),
 		nextSlot:    make(map[string]int),
 	}
@@ -370,6 +371,41 @@ func TestHandleKillAgent_NonZeroSlotNotProtected(t *testing.T) {
 	}
 }
 
+func TestHandleKillAgent_CleansArtifactDirectory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	allow := false
+	cfg.AgentMode.ProtectSlotZero = &allow
+
+	s := &Server{
+		config:   cfg,
+		tracked:  make(map[string]map[int]trackedAgent),
+		nextSlot: make(map[string]int),
+	}
+
+	base := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", base)
+
+	slot := s.allocateSlot(DefaultWorkspace, "codex", "%42", "pane", false)
+	dir, err := EnsureArtifactDir(DefaultWorkspace, slot)
+	if err != nil {
+		t.Fatalf("EnsureArtifactDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "output.json"), []byte("artifact"), 0o644); err != nil {
+		t.Fatalf("failed to write artifact file: %v", err)
+	}
+
+	_, out, err := s.handleKillAgent(nil, nil, KillAgentInput{Slot: slot, Workspace: DefaultWorkspace})
+	if err != nil {
+		t.Fatalf("handleKillAgent: %v", err)
+	}
+	if !out.Killed {
+		t.Fatal("expected Killed=true")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("expected artifact dir to be removed, stat err=%v", err)
+	}
+}
+
 // containsAll checks if s contains all the given substrings.
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
@@ -448,17 +484,18 @@ func TestCompactWindowSlots_ShiftsTrackingState(t *testing.T) {
 	s := &Server{
 		config:        config.DefaultConfig(),
 		multiplexer:   agent.NewTmuxMultiplexer(),
-		artifacts:     NewArtifactStore(DefaultArtifactCapBytes),
 		tracked:       make(map[string]map[int]trackedAgent),
 		nextSlot:      make(map[string]int),
 		readSnapshots: make(map[string]map[int]string),
 	}
+	base := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", base)
 
 	_ = s.trackSpecificSlot("ws", 0, "claude", "termtile-ws-0:0.0", "window", false)
 	_ = s.trackSpecificSlot("ws", 2, "codex", "termtile-ws-2:0.0", "window", false)
 	_ = s.trackSpecificSlot("ws", 3, "gemini", "termtile-ws-3:0.0", "window", false)
-	s.artifacts.Set("ws", 2, "artifact-2")
-	s.artifacts.Set("ws", 3, "artifact-3")
+	writeHookArtifactForTest(t, "ws", 2, "artifact-2")
+	writeHookArtifactForTest(t, "ws", 3, "artifact-3")
 	s.setReadSnapshot("ws", 2, "snap-2")
 	s.setReadSnapshot("ws", 3, "snap-3")
 
@@ -475,11 +512,11 @@ func TestCompactWindowSlots_ShiftsTrackingState(t *testing.T) {
 	if target, ok := s.getTmuxTarget("ws", 2); !ok || target != "termtile-ws-2:0.0" {
 		t.Fatalf("slot 2 target = %q (ok=%v), want termtile-ws-2:0.0", target, ok)
 	}
-	if art, ok := s.artifacts.Get("ws", 1); !ok || art.Output != "artifact-2" {
-		t.Fatalf("artifact slot 1 = %q (ok=%v), want artifact-2", art.Output, ok)
+	if output, err := readArtifactOutputField("ws", 1); err != nil || output != "artifact-2" {
+		t.Fatalf("artifact slot 1 = %q (err=%v), want artifact-2", output, err)
 	}
-	if art, ok := s.artifacts.Get("ws", 2); !ok || art.Output != "artifact-3" {
-		t.Fatalf("artifact slot 2 = %q (ok=%v), want artifact-3", art.Output, ok)
+	if output, err := readArtifactOutputField("ws", 2); err != nil || output != "artifact-3" {
+		t.Fatalf("artifact slot 2 = %q (err=%v), want artifact-3", output, err)
 	}
 	if got := s.getReadSnapshot("ws", 1); got != "snap-2" {
 		t.Fatalf("read snapshot slot 1 = %q, want snap-2", got)

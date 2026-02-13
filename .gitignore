@@ -55,9 +55,19 @@ Desktop.ini
 .claude/
 CLAUDE.md
 
+# VitePress
+docs/.vitepress/cache
+docs/.vitepress/dist
+docs/node_modules/
+package-lock.json
+
+# Artifact output (test/debug)
+output.json
+
 # Debug binaries
 __debug_bin*
 
 # Local media (raw recordings, large gifs)
 media/
 .aider*
+.cecli*

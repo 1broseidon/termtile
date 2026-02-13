@@ -146,21 +146,45 @@ func (a *AgentMode) GetProtectSlotZero() bool {
 	return *a.ProtectSlotZero
 }
 
+// AgentHooks configures termtile's 3 abstract hook points for an agent.
+// Each field is a shell command that termtile injects into the agent's
+// native hook system (e.g., Claude Code --settings, Gemini env vars).
+type AgentHooks struct {
+	OnStart string `yaml:"on_start,omitempty"` // Fires on session start — inject context
+	OnCheck string `yaml:"on_check,omitempty"` // Fires mid-conversation — steering/validation
+	OnEnd   string `yaml:"on_end,omitempty"`   // Fires on stop — capture output
+}
+
 // AgentConfig describes a CLI agent that can be spawned via MCP.
 type AgentConfig struct {
 	Command       string            `yaml:"command"`
 	Args          []string          `yaml:"args,omitempty"`
 	ReadyPattern  string            `yaml:"ready_pattern,omitempty"`
 	IdlePattern   string            `yaml:"idle_pattern,omitempty"`
+	OutputMode    string            `yaml:"output_mode,omitempty"` // "hooks" (default), "tags", or "terminal"
+	Hooks         AgentHooks        `yaml:"hooks,omitempty"`
 	Description   string            `yaml:"description,omitempty"`
 	Env           map[string]string `yaml:"env,omitempty"`
 	PromptAsArg   bool              `yaml:"prompt_as_arg,omitempty"`
+	PromptFlag    string            `yaml:"prompt_flag,omitempty"`    // flag to pass task (e.g. "-i" for gemini); empty = positional arg
 	SpawnMode     string            `yaml:"spawn_mode,omitempty"`     // "pane" (default) or "window"
 	ResponseFence bool              `yaml:"response_fence,omitempty"` // prepend task with fence instructions for structured output parsing
 	PipeTask      bool              `yaml:"pipe_task,omitempty"`      // pipe task via stdin instead of appending as arg or sending via send-keys
 	Models        []string          `yaml:"models,omitempty"`
 	DefaultModel  string            `yaml:"default_model,omitempty"`
 	ModelFlag     string            `yaml:"model_flag,omitempty"`
+
+	// Hook delivery configuration (data-driven, replaces hardcoded per-agent logic).
+	HookDelivery     string                 `yaml:"hook_delivery,omitempty"`      // "cli_flag", "project_file", "none"
+	HookSettingsFlag string                 `yaml:"hook_settings_flag,omitempty"` // e.g. "--settings"
+	HookSettingsDir  string                 `yaml:"hook_settings_dir,omitempty"`  // e.g. ".gemini"
+	HookSettingsFile string                 `yaml:"hook_settings_file,omitempty"` // e.g. "settings.json"
+	HookFormat       string                 `yaml:"hook_format,omitempty"`        // "json" (default)
+	HookEvents        map[string]string      `yaml:"hook_events,omitempty"`         // abstract → native event mapping
+	HookEntry         map[string]interface{} `yaml:"hook_entry,omitempty"`          // template for one event entry
+	HookWrapper       map[string]interface{} `yaml:"hook_wrapper,omitempty"`        // top-level wrapper; "{{events}}" sentinel
+	HookOutput        map[string]interface{} `yaml:"hook_output,omitempty"`         // stdout response template; "{{context}}" placeholder
+	HookResponseField string                 `yaml:"hook_response_field,omitempty"` // stdin JSON field with agent response (e.g. "prompt_response"); empty = transcript
 }
 
 type ProjectCWDMode string
@@ -372,6 +396,26 @@ func DefaultConfig() *Config {
 				IdlePattern:   "\u276f", // ❯ (U+276F) Claude Code input prompt
 				ResponseFence: true,
 				Models:        []string{"sonnet", "haiku", "opus"},
+				HookDelivery:     "cli_flag",
+				HookSettingsFlag: "--settings",
+				HookEvents: map[string]string{
+					"on_start": "SessionStart",
+					"on_check": "PostToolUse",
+					"on_end":   "Stop",
+				},
+				HookEntry: map[string]interface{}{
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": "{{command}}"},
+					},
+				},
+				HookWrapper: map[string]interface{}{
+					"hooks": "{{events}}",
+				},
+				HookOutput: map[string]interface{}{
+					"hookSpecificOutput": map[string]interface{}{
+						"additionalContext": "{{context}}",
+					},
+				},
 			},
 			"codex": {
 				Command:       "codex",
@@ -391,6 +435,30 @@ func DefaultConfig() *Config {
 				PromptAsArg:   true,
 				IdlePattern:   ">", // Gemini input prompt
 				ResponseFence: true,
+				HookDelivery:      "project_file",
+				HookSettingsDir:   ".gemini",
+				HookSettingsFile:  "settings.json",
+				HookResponseField: "prompt_response",
+				HookEvents: map[string]string{
+					"on_start": "BeforeAgent",
+					"on_check": "AfterTool",
+					"on_end":   "AfterAgent",
+				},
+				HookEntry: map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": "{{command}}"},
+					},
+				},
+				HookWrapper: map[string]interface{}{
+					"hooks": "{{events}}",
+				},
+				HookOutput: map[string]interface{}{
+					"decision": "allow",
+					"hookSpecificOutput": map[string]interface{}{
+						"additionalContext": "{{context}}",
+					},
+				},
 			},
 			"cursor-agent": {
 				Command:       "cursor-agent",

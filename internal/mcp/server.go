@@ -32,12 +32,8 @@ type trackedAgent struct {
 	spawnMode      string // "pane" or "window"
 	responseFence  bool   // true if fence instructions were prepended to the task
 	fencePairCount int    // baseline count of standalone close tags at last task send
-	// lastArtifactCloseCount tracks the last close-tag count for which we captured
-	// and stored an artifact. Used to avoid repeatedly capturing full scrollback
-	// on every checkIdle poll once the agent is idle.
-	lastArtifactCloseCount int
-	pipeFilePath           string // path to pipe-pane output file; empty = not active
-	lastPipeSize           int64  // last stat'd file size for cheap change detection
+	pipeFilePath   string // path to pipe-pane output file; empty = not active
+	lastPipeSize   int64  // last stat'd file size for cheap change detection
 }
 
 // Server is the MCP server for termtile agent orchestration.
@@ -46,7 +42,6 @@ type Server struct {
 	config      *config.Config
 	multiplexer *agent.TmuxMultiplexer
 	logger      *agent.Logger
-	artifacts   *ArtifactStore
 
 	mu       sync.Mutex
 	tracked  map[string]map[int]trackedAgent // workspace -> slot -> info
@@ -90,7 +85,6 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		config:          cfg,
 		multiplexer:     mux,
 		logger:          logger,
-		artifacts:       NewArtifactStore(DefaultArtifactCapBytes),
 		tracked:         make(map[string]map[int]trackedAgent),
 		nextSlot:        make(map[string]int),
 		readSnapshots:   make(map[string]map[int]string),
@@ -148,7 +142,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
 		Name:        "get_artifact",
-		Description: "Fetch the last captured output artifact for a workspace slot. Artifacts are stored in memory (not persisted) and are cleared when the slot is killed or pruned.",
+		Description: "Fetch the last captured output artifact for a workspace slot from output.json on disk.",
 	}, s.handleGetArtifact)
 
 	mcpsdk.AddTool(s.mcpServer, &mcpsdk.Tool{
@@ -255,13 +249,71 @@ func (s *Server) waitForDependencies(workspace string, slots []int, timeoutSecon
 	}
 }
 
-// reconcile rebuilds startup tracking state from existing termtile tmux sessions.
+// reconcile rebuilds startup tracking state from existing termtile tmux sessions
+// and cleans stale workspace registry entries whose tmux sessions no longer exist.
 func (s *Server) reconcile() {
 	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		return
 	}
-	s.reconcileSessionNames(strings.Split(strings.TrimSpace(string(out)), "\n"))
+	sessionNames := strings.Split(strings.TrimSpace(string(out)), "\n")
+	s.reconcileSessionNames(sessionNames)
+
+	// Build a set of live tmux session names for quick lookup.
+	liveSessions := make(map[string]bool, len(sessionNames))
+	for _, name := range sessionNames {
+		liveSessions[strings.TrimSpace(name)] = true
+	}
+
+	// Restore any orphaned project file hook injections.
+	reconcileHookFileState(liveSessions)
+
+	// Clean workspace registry entries whose tmux sessions are gone.
+	allSlots, err := workspacepkg.GetAllSlots()
+	if err != nil {
+		return
+	}
+	for windowID, slot := range allSlots {
+		if slot.SessionName == "" || !strings.HasPrefix(slot.SessionName, "termtile-") {
+			continue
+		}
+		if !liveSessions[slot.SessionName] {
+			log.Printf("reconcile: removing stale registry entry window=%d session=%s slot=%d",
+				windowID, slot.SessionName, slot.SlotIndex)
+			_ = workspacepkg.RemoveSlotByWindowID(windowID)
+		}
+	}
+}
+
+// workspaceCwd returns the working directory of an existing agent in the
+// workspace by querying tmux. It checks in-memory tracked agents first (lowest
+// slot), then falls back to probing the well-known session name for slot 0
+// (which may be registry-backed and not in the tracked map).
+func (s *Server) workspaceCwd(workspace string) string {
+	s.mu.Lock()
+	var bestTarget string
+	if ws := s.tracked[workspace]; ws != nil {
+		bestSlot := -1
+		for slot, ta := range ws {
+			if bestSlot < 0 || slot < bestSlot {
+				bestSlot = slot
+				bestTarget = ta.tmuxTarget
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if bestTarget == "" {
+		// Slot 0 may be registry-backed (not in tracked map). Try its
+		// well-known session name directly.
+		bestTarget = agent.TargetForSession(agent.SessionName(workspace, 0))
+	}
+
+	out, err := exec.Command("tmux", "display-message", "-t", bestTarget, "-p", "#{pane_current_path}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // reconcileSessionNames applies reconcile logic over a provided session list.
@@ -341,9 +393,6 @@ func (s *Server) anyPaneModeTarget(workspace string) string {
 		}
 		// Target was killed externally — prune it.
 		delete(ws, slot)
-		if s.artifacts != nil {
-			s.artifacts.Clear(workspace, slot)
-		}
 		s.clearReadSnapshot(workspace, slot)
 	}
 	return ""
@@ -421,12 +470,11 @@ func (s *Server) trackSlotLocked(workspace string, slot int, agentType, tmuxTarg
 		s.tracked[workspace] = make(map[int]trackedAgent)
 	}
 	s.tracked[workspace][slot] = trackedAgent{
-		agentType:              agentType,
-		tmuxTarget:             tmuxTarget,
-		spawnMode:              spawnMode,
-		responseFence:          responseFence,
-		fencePairCount:         0,
-		lastArtifactCloseCount: 0,
+		agentType:      agentType,
+		tmuxTarget:     tmuxTarget,
+		spawnMode:      spawnMode,
+		responseFence:  responseFence,
+		fencePairCount: 0,
 	}
 }
 
@@ -457,9 +505,6 @@ func (s *Server) removeTracked(workspace string, slot int) {
 		delete(rs, slot)
 	}
 	s.mu.Unlock()
-	if s.artifacts != nil {
-		s.artifacts.Clear(workspace, slot)
-	}
 }
 
 // getTracked returns all tracked agents for a workspace.
@@ -559,7 +604,7 @@ func shellQuote(s string) string {
 //	Tier 1: Content-based detection via IdlePattern.
 //	Tier 2: Process-based fallback (pane child process check).
 func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
-	hasFence, baselineCount, lastArtifactCount := s.getFenceCaptureCounts(workspace, slot)
+	hasFence, baselineCount := s.getFenceState(workspace, slot)
 
 	if hasFence {
 		// Tier 0a: pipe-pane based detection.
@@ -575,9 +620,6 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 			if err == nil {
 				s.updateLastPipeSize(workspace, slot, size)
 				if count > baselineCount {
-					if s.artifacts != nil && count > lastArtifactCount {
-						s.captureAndStoreFenceArtifact(target, workspace, slot, count)
-					}
 					return true
 				}
 				// No new close tags yet — still working.
@@ -593,9 +635,6 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 		}
 		currentCount := countCloseTags(out)
 		if currentCount > baselineCount {
-			if s.artifacts != nil && currentCount > lastArtifactCount {
-				s.captureAndStoreFenceArtifact(target, workspace, slot, currentCount)
-			}
 			return true
 		}
 		// Fence expected but no new response yet — the agent is still working.
@@ -633,55 +672,6 @@ func (s *Server) checkIdle(target, agentType, workspace string, slot int) bool {
 		return true
 	}
 	return false
-}
-
-// captureAndStoreFenceArtifact captures full scrollback for a fence-enabled slot,
-// extracts the last response content, and stores it as an artifact. Best-effort:
-// capture failures do not change the idle decision.
-func (s *Server) captureAndStoreFenceArtifact(target, workspace string, slot int, closeTagCount int) {
-	// Full scrollback required to reliably find the opening tag for long responses.
-	full, err := tmuxCapturePane(target, 0)
-	if err != nil {
-		return
-	}
-	cleaned := trimOutput(cleanOutput(full), true)
-	s.artifacts.Set(workspace, slot, cleaned)
-	s.setLastArtifactCloseCount(workspace, slot, closeTagCount)
-}
-
-// captureAndStoreArtifactForSlot captures the most recent output for a slot and
-// stores it as an artifact. For fence-enabled slots, it captures full scrollback
-// so the opening tag can be found for long responses.
-func (s *Server) captureAndStoreArtifactForSlot(workspace string, slot int) error {
-	if s == nil || s.artifacts == nil {
-		return fmt.Errorf("artifact store not initialized")
-	}
-	target, ok := s.getTmuxTarget(workspace, slot)
-	if !ok {
-		return fmt.Errorf("no agent tracked in workspace %q slot %d", workspace, slot)
-	}
-	if strings.TrimSpace(target) == "" {
-		return fmt.Errorf("slot %d has empty tmux target in workspace %q", slot, workspace)
-	}
-	if !tmuxTargetExists(target) {
-		return fmt.Errorf("slot %d (target %s) is not alive (killed)", slot, target)
-	}
-
-	fence, _ := s.getFenceState(workspace, slot)
-	captureLines := 200
-	if fence {
-		captureLines = 0 // full scrollback for reliable fence extraction
-	}
-	raw, err := tmuxCapturePane(target, captureLines)
-	if err != nil {
-		return err
-	}
-	cleaned := trimOutput(cleanOutput(raw), fence)
-	s.artifacts.Set(workspace, slot, cleaned)
-	if fence {
-		s.setLastArtifactCloseCount(workspace, slot, countCloseTags(raw))
-	}
-	return nil
 }
 
 // lastNonEmptyLine returns the last non-blank line from text.
@@ -735,23 +725,6 @@ func (s *Server) getFenceState(workspace string, slot int) (hasFence bool, pairC
 	return ta.responseFence, ta.fencePairCount
 }
 
-// getFenceCaptureCounts returns the fence baseline close-tag count and the last
-// close-tag count for which we captured an artifact.
-func (s *Server) getFenceCaptureCounts(workspace string, slot int) (hasFence bool, baseline int, lastArtifact int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ws := s.tracked[workspace]
-	if ws == nil {
-		return false, 0, 0
-	}
-	ta, ok := ws[slot]
-	if !ok {
-		return false, 0, 0
-	}
-	return ta.responseFence, ta.fencePairCount, ta.lastArtifactCloseCount
-}
-
 // updateFenceState updates the fence detection state for a tracked slot.
 func (s *Server) updateFenceState(workspace string, slot int, responseFence bool, pairCount int) {
 	s.mu.Lock()
@@ -767,28 +740,6 @@ func (s *Server) updateFenceState(workspace string, slot int, responseFence bool
 	}
 	ta.responseFence = responseFence
 	ta.fencePairCount = pairCount
-	if responseFence {
-		// Reset artifact capture counter to the baseline at send time.
-		ta.lastArtifactCloseCount = pairCount
-	} else {
-		ta.lastArtifactCloseCount = 0
-	}
-	ws[slot] = ta
-}
-
-func (s *Server) setLastArtifactCloseCount(workspace string, slot int, count int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ws := s.tracked[workspace]
-	if ws == nil {
-		return
-	}
-	ta, ok := ws[slot]
-	if !ok {
-		return
-	}
-	ta.lastArtifactCloseCount = count
 	ws[slot] = ta
 }
 
