@@ -859,7 +859,7 @@ columns:
           - internal/mcp/tools.go
           - internal/mcp/hooks.go
         contract:
-          status: ready
+          status: done
           deliverables:
             - type: file
               path: internal/mcp/hooks.go
