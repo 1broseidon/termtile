@@ -59,7 +59,7 @@ CLAUDE.md
 docs/.vitepress/cache
 docs/.vitepress/dist
 docs/node_modules/
-package-lock.json
+/package-lock.json
 
 # Artifact output (test/debug)
 output.json
