@@ -1,4 +1,16 @@
 import DefaultTheme from 'vitepress/theme'
+import { h } from 'vue'
+import { useData } from 'vitepress'
 import './custom.css'
+import Home from './Home.vue'
 
-export default DefaultTheme
+export default {
+  extends: DefaultTheme,
+  Layout() {
+    const { frontmatter } = useData()
+    if (frontmatter.value.layout === 'custom-home') {
+      return h(Home)
+    }
+    return h(DefaultTheme.Layout)
+  },
+}

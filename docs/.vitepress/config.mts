@@ -5,6 +5,7 @@ export default defineConfig({
   description: 'Tiling window manager with AI agent orchestration',
   base: '/termtile/',
   appearance: false,
+  cleanUrls: true,
 
   head: [
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
