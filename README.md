@@ -1,5 +1,7 @@
 # termtile
 
+[![GitHub Stars](https://img.shields.io/github/stars/1broseidon/termtile?style=social)](https://github.com/1broseidon/termtile/stargazers)
+
 A terminal window tiling manager and agent orchestrator for Linux/X11.
 
 ![termtile agent orchestration demo](termtile-demo-github.gif)
