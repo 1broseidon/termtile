@@ -1,6 +1,8 @@
 # termtile
 
 [![GitHub Stars](https://img.shields.io/github/stars/1broseidon/termtile?style=social)](https://github.com/1broseidon/termtile/stargazers)
+[![Go Reference](https://pkg.go.dev/badge/github.com/1broseidon/termtile.svg)](https://pkg.go.dev/github.com/1broseidon/termtile)
+[![Go Report Card](https://goreportcard.com/badge/github.com/1broseidon/termtile)](https://goreportcard.com/report/github.com/1broseidon/termtile)
 
 A terminal window tiling manager and agent orchestrator for Linux/X11.
 
